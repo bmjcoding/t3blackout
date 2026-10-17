@@ -110,11 +110,17 @@ function releaseNotes(fromSha, toSha, version) {
 }
 
 function checkoutWork(ref) {
-  if (fs.existsSync(WORK)) {
-    run("git", ["-C", MIRROR, "worktree", "remove", "--force", WORK]);
+  if (fs.existsSync(path.join(WORK, ".git"))) {
+    // Reuse the checkout and its node_modules: deleting them took most of a
+    // minute, and `pnpm install --frozen-lockfile` brings node_modules back in
+    // line with the new lockfile. Everything else, build output included, goes.
+    run("git", ["-C", WORK, "checkout", "--quiet", "--force", "--detach", ref]);
+    run("git", ["-C", WORK, "clean", "-fdxq", "-e", "node_modules"]);
+  } else {
+    fs.rmSync(WORK, { recursive: true, force: true });
+    run("git", ["-C", MIRROR, "worktree", "prune"]);
+    run("git", ["-C", MIRROR, "worktree", "add", "--quiet", "--detach", WORK, ref]);
   }
-  run("git", ["-C", MIRROR, "worktree", "prune"]);
-  run("git", ["-C", MIRROR, "worktree", "add", "--quiet", "--detach", WORK, ref]);
   // Upstream's .env.example holds production Clerk/relay values; a stray .env
   // would bake them in. The rules already force those constants empty.
   for (const name of [".env", ".env.local"]) fs.rmSync(path.join(WORK, name), { force: true });
@@ -156,6 +162,7 @@ function buildApp(version) {
   const opts = { cwd: WORK, env: buildEnv() };
   log("installing dependencies");
   run("pnpm", ["install", "--frozen-lockfile"], opts);
+  progress(40);
   // The injected updater implements upstream's ElectronUpdater service; if that
   // interface moves, stop here instead of shipping an app that fails at runtime.
   // Upstream's own script, run directly: `pnpm run` re-verifies the install.
@@ -210,7 +217,8 @@ async function seedPricing() {
 // --------------------------------------------------------------- commands --
 
 // The app runs these commands with --json and reads `t3blackout:event {...}`
-// lines from stdout; everything else on stdout is build output.
+// lines from stdout; everything else on stdout is build output. The app only
+// redraws progress on 10% steps, so each step should cross one.
 let jsonEvents = false;
 const emit = (event) => jsonEvents && console.log(`t3blackout:event ${JSON.stringify(event)}`);
 const progress = (percent) => emit({ type: "progress", percent });
@@ -287,7 +295,7 @@ async function cmdUpdate(opts) {
 
 async function update(opts) {
   fetchUpstream();
-  progress(5);
+  progress(10);
   const ref = opts.ref ?? resolveRef(opts.channel ?? appChannel());
   const sha = capture("git", ["-C", MIRROR, "rev-parse", `${ref}^{commit}`]);
   const build = { ref, sha, version: versionOf(ref, sha) };
@@ -310,15 +318,15 @@ async function update(opts) {
   let staged = null;
   try {
     checkoutWork(sha);
-    progress(25);
     strip();
+    progress(20);
     buildApp(build.version);
-    progress(75);
+    progress(70);
     staged = platform.stage(stages.findArtifact());
     verify(staged);
     progress(80);
     await smokeTest();
-    progress(97);
+    progress(90);
     await seedPricing();
     if (stageOnly()) {
       keepPending(staged, build);

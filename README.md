@@ -145,7 +145,7 @@ treat it as a valid identity on that Mac.
   and mobile pairing through T3's servers are gone.
 - **Remote images in chat don't render.** GitHub images still work (the server fetches
   them). Link favicons show a generic icon.
-- **Updates take a few minutes.** Each one is a local build, not a download.
+- **Updates take a minute or two.** Each one is a local build, not a download.
 - **No provider CLI update nudges.** That check talks only to npm and GitHub. Turn it
   back on in Settings if you want it.
 - **The model list is the one bundled in each build.** Daily rebuilds keep it at most
