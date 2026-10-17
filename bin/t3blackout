@@ -203,8 +203,11 @@ function strip() {
 
 /** Build-time env: no cloud keys, no publish tokens, everything via the build proxy. */
 function buildEnv() {
-  const keep = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM"];
+  const keep = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM"];
   const base = Object.fromEntries(keep.filter((k) => process.env[k]).map((k) => [k, process.env[k]]));
+  // Upstream's build spawns `vp` by name; use the repo's own vite-plus so a
+  // fresh Mac doesn't need it installed globally.
+  base.PATH = [path.join(WORK, "node_modules", ".bin"), process.env.PATH ?? "/usr/bin:/bin"].join(":");
   return proxiedEnv(BUILD_PORT, {
     ...base,
     CI: "1",

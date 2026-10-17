@@ -64,19 +64,38 @@ and asks launchd to start `dev.t3blackout.launch`, an inert LaunchAgent that `up
 installs. That agent runs `t3blackout launch` and quits. The guard's decisions are
 logged to `~/.t3blackout/guard.log`.
 
-## Setting up another Mac
+## Install (each Mac)
 
-Each Mac builds its own copy from the same upstream tag. Run these on each new Mac:
+Each Mac builds its own copy from the same upstream tag. You need Homebrew, the Xcode
+Command Line Tools, and the 1Password app with **Settings → Developer → Integrate with
+1Password CLI** turned on. Run this from Terminal, so the 1Password prompt names
+Terminal:
 
 ```sh
-# Prerequisites: Xcode CLT, Homebrew node + pnpm, Rust, 1Password app with
-# Settings → Developer → "Integrate with 1Password CLI" turned on.
-brew install --cask 1password-cli
-# Copy or clone this repo, at any path.
-bin/t3blackout signing import --vault Personal   # 1Password approval + one macOS password prompt
-bin/t3blackout update                            # build, verify, smoke-test, install
-bin/t3blackout schedule --hour 4                 # optional: daily auto-update
+gh repo clone bmjcoding/t3blackout && cd t3blackout   # any path works
+./install.sh
 ```
+
+`install.sh` is safe to rerun. It:
+
+1. Installs missing tools with Homebrew (git, node, pnpm, Rust, 1Password CLI).
+2. Sets up signing:
+   - Imports the signing certificate from 1Password, or creates it on the first Mac.
+   - Asks for one 1Password approval and one macOS password prompt.
+3. Builds, verifies, smoke-tests and installs the app.
+4. Schedules the daily update at 04:00.
+
+Override the defaults with `T3BLACKOUT_VAULT` and `T3BLACKOUT_UPDATE_HOUR`. Apple silicon
+only; Linux isn't supported yet (see below).
+
+## Planned
+
+- **Peers (Mac-to-Mac over Tailscale).** One list of tailnet hosts that feeds both the
+  UI's CSP at build time and the proxy at runtime. That opens remote environments to
+  exactly those machines.
+- **Linux.** The strip rules, proxy, build checks and smoke test are portable. The
+  sandbox (network namespace and nftables, or bubblewrap), the systemd timer and
+  signing need Linux equivalents.
 
 ## Signing and Keychain prompts
 
