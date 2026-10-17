@@ -10,7 +10,7 @@
 //   t3blackout status                  installed version, schedule, signing
 //   t3blackout rollback                swap back to the previously installed build
 //   t3blackout schedule [--hour 4] | unschedule   daily update (launchd / systemd timer)
-//   t3blackout signing init|import|status [--vault V]   macOS: shared signing cert via 1Password
+//   t3blackout signing adopt|import|init|status [--vault V]   macOS: shared signing identity via 1Password
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -23,6 +23,7 @@ import { forbiddenInBuild, makeRules } from "../lib/rules.mjs";
 import {
   LAUNCHER,
   MIRROR,
+  ROOT,
   STATE,
   T3B_HOME,
   WORK,
@@ -89,6 +90,9 @@ function resolveRef(name) {
   if (!tags[0]) throw new Error(`no ${channel} tags upstream`);
   return tags[0];
 }
+
+/** This repo's commit: a build is upstream sha + the rules that stripped it. */
+const blackoutCommit = () => spawnSync("git", ["-C", ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
 
 /** App version for a ref: the tag itself, or the nearest tag for a branch or sha. */
 function versionOf(ref, sha) {
@@ -264,13 +268,13 @@ function readPending() {
 }
 
 /** Swaps `dir` in as the installed app and records it. */
-function install(dir, { ref, sha, version }) {
+function install(dir, { ref, sha, version, blackout }) {
   const current = readJson(CURRENT, {});
   platform.activate(dir);
   if (dir !== platform.pendingPath) fs.rmSync(platform.pendingPath, { recursive: true, force: true });
   fs.rmSync(PENDING, { force: true });
   fs.writeFileSync(PREVIOUS, JSON.stringify(current, null, 2));
-  fs.writeFileSync(CURRENT, JSON.stringify({ ref, sha, version, installedAt: new Date().toISOString() }, null, 2));
+  fs.writeFileSync(CURRENT, JSON.stringify({ ref, sha, version, blackout, installedAt: new Date().toISOString() }, null, 2));
   log(`installed ${ref} -> ${platform.installedPath}`);
 }
 
@@ -298,22 +302,23 @@ async function update(opts) {
   progress(10);
   const ref = opts.ref ?? resolveRef(opts.channel ?? appChannel());
   const sha = capture("git", ["-C", MIRROR, "rev-parse", `${ref}^{commit}`]);
-  const build = { ref, sha, version: versionOf(ref, sha) };
+  const build = { ref, sha, version: versionOf(ref, sha), blackout: blackoutCommit() };
   const current = readJson(CURRENT, {});
   const pending = readPending();
+  const isBuild = (record) => record?.sha === sha && record.blackout === build.blackout;
   // The app is never swapped while it runs; it restarts into the new build.
   const stageOnly = () => opts["stage-only"] || platform.isRunning();
-  if (current.sha === sha && !opts.force) {
+  if (isBuild(current) && !opts.force) {
     log(`already on ${ref} (${sha.slice(0, 10)}); nothing to do`);
     return;
   }
-  if (pending?.sha === sha && !opts.force) {
+  if (isBuild(pending) && !opts.force) {
     if (stageOnly()) log(`${ref} is already built and waiting for T3 Blackout to restart`);
     else install(platform.pendingPath, pending);
     progress(100);
     return;
   }
-  log(`updating to ${ref} (${sha.slice(0, 10)})`);
+  log(current.sha === sha ? `rebuilding ${ref} with the current strip rules` : `updating to ${ref} (${sha.slice(0, 10)})`);
   const stages = platform.beginBuild();
   let staged = null;
   try {
@@ -350,20 +355,27 @@ async function update(opts) {
   }
 }
 
-/** Reports the newest upstream release on the channel if it isn't installed. */
+/**
+ * Reports the newest upstream release on the channel if it isn't installed, or
+ * else a built one waiting for a restart (e.g. rebuilt with new strip rules).
+ */
 function cmdPoll(opts) {
   // A running update is fetching into the mirror; read what it has.
   if (!opts.offline && !lockHolder()) fetchUpstream();
+  const current = readJson(CURRENT, {});
+  const pending = readPending();
   let available = null;
   if (fs.existsSync(path.join(MIRROR, ".git"))) {
     const ref = resolveRef(opts.channel ?? appChannel());
     const sha = capture("git", ["-C", MIRROR, "rev-parse", `${ref}^{commit}`]);
-    const current = readJson(CURRENT, {});
     const isNewer = !current.sha || commitTime(sha) >= commitTime(current.sha);
     if (sha !== current.sha && (isNewer || opts["allow-downgrade"])) {
       const version = versionOf(ref, sha);
-      available = { ref, sha, version, staged: readPending()?.sha === sha, releaseNotes: releaseNotes(current.sha, sha, version) };
+      available = { ref, sha, version, staged: pending?.sha === sha, releaseNotes: releaseNotes(current.sha, sha, version) };
     }
+  }
+  if (!available && pending && pending.stagedAt > (current.installedAt ?? "")) {
+    available = { ...pending, staged: true, releaseNotes: releaseNotes(current.sha, pending.sha, pending.version) };
   }
   if (jsonEvents) emit({ type: "poll", update: available });
   else if (!available) console.log("up to date");

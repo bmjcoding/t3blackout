@@ -109,7 +109,7 @@ bin/t3blackout smoke             # re-run the zero-egress smoke test on the last
 bin/t3blackout launch            # open the app, installing a waiting build first
 bin/t3blackout status | rollback
 bin/t3blackout schedule --hour 4 | unschedule
-bin/t3blackout signing init|import|status --vault Personal   # macOS only
+bin/t3blackout signing adopt|import|init|status --vault Personal   # macOS only
 ```
 
 The app keeps its state in `~/.t3blackout` and never touches the official app's `~/.t3`.
@@ -124,19 +124,33 @@ So both apps can be installed side by side.
 
 ## Signing and Keychain prompts (macOS)
 
-macOS ties Keychain "Always Allow" grants to an app's signature. Ad-hoc signatures change
-with every build, so each update would ask again. Instead, every build is signed with
-**T3 Blackout Local Signing**, a self-signed certificate:
+T3 Blackout keeps its encryption key ("t3blackout Safe Storage") in your Keychain. macOS
+lets the app read it without asking only when both of these match what you approved:
 
-- It was created once and stored in 1Password (Personal vault, "T3 Blackout code signing").
-- Each Mac imports it into `state/signing.keychain-db`. That file is separate from your
-  login keychain; its random password is in `state/signing.keychain-pass`, mode 600.
-- Each Mac trusts it for code signing only.
-- After you click "Always Allow" once per Mac, updates don't prompt again.
+- **The app's code requirement.** This stays the same for any build signed with the
+  same certificate.
+- **Its "partition".** For an Apple-issued certificate this is your team ID, which stays
+  the same across builds. For anything else it's that build's exact hash, so every
+  update asks again.
 
-If signing isn't set up, `update` falls back to ad-hoc signing and logs a warning.
-Trusting this certificate doesn't get anything past Gatekeeper. It only makes `codesign`
-treat it as a valid identity on that Mac.
+So builds are signed with an **Apple Development certificate**. It's free with any
+Apple ID, and only the first Mac needs Xcode:
+
+1. In Xcode: Settings → Accounts → add your Apple ID → select "(Personal Team)" →
+   Manage Certificates → + → Apple Development.
+2. Run `bin/t3blackout signing adopt`. It exports the certificate (macOS asks you to
+   allow it), adds Apple's intermediate certificate, stores both in 1Password
+   (Personal vault, "T3 Blackout code signing") and installs them into
+   `state/signing.keychain-db`. That keychain is separate from your login keychain,
+   and its random password is in `state/signing.keychain-pass` (mode 600).
+3. Other Macs: `install.sh` (or `bin/t3blackout signing import`) fetches it from
+   1Password.
+4. After the first build signed with it, click **Always Allow** on both prompts (one for
+   the app, one for its helper). That's once per Mac.
+
+The certificate expires after a year: renew it in Xcode and run `signing adopt` again.
+Without one, `signing init` creates a self-signed fallback, which works but prompts after
+every update. Signing never contacts Apple, because no timestamp is requested.
 
 ## What you give up
 

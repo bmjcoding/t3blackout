@@ -6,7 +6,8 @@
 #   T3BLACKOUT_UPDATE_HOUR=6 T3BLACKOUT_VAULT=Other ./install.sh
 #
 # macOS: installs missing tools with Homebrew, sets up the shared signing
-#   certificate from 1Password (creating it on the first Mac), builds, installs.
+#   identity from 1Password (from your Apple Development certificate on the
+#   first Mac), builds, installs.
 # Linux (Omarchy/Arch, Ubuntu/Debian, Fedora/RHEL): installs system packages
 #   with the distro package manager and Node 24, pnpm and Rust into your home
 #   directory, then builds and installs. No signing step: Linux keyrings don't
@@ -53,10 +54,15 @@ mac_setup() {
     op vault list >/dev/null 2>&1 ||
       die "Turn on 1Password → Settings → Developer → \"Integrate with 1Password CLI\", then rerun ./install.sh"
     if op item get "$OP_ITEM" --vault "$VAULT" >/dev/null 2>&1; then
-      say "Importing the shared signing certificate from 1Password ($VAULT)"
+      say "Importing the shared signing identity from 1Password ($VAULT)"
       bin/t3blackout signing import --vault "$VAULT"
+    elif security find-identity -v -p codesigning "$HOME/Library/Keychains/login.keychain-db" |
+      grep -qE '"(Apple Development|Developer ID Application): '; then
+      say "Sharing your Apple Development certificate through 1Password ($VAULT)"
+      bin/t3blackout signing adopt --vault "$VAULT"
     else
-      say "No signing certificate in 1Password yet; creating one in \"$VAULT\""
+      say "No Apple Development certificate found; creating a self-signed one in \"$VAULT\""
+      say "Keychain will ask again after each update until you run: bin/t3blackout signing adopt (see README)"
       bin/t3blackout signing init --vault "$VAULT"
     fi
   else
