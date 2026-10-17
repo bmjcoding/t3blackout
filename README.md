@@ -21,10 +21,14 @@ Codex's and Claude Code's own sandboxes work normally.
    They also give the app its own name, bundle ID and data directory. Each rule states
    how many times its anchor must match; if upstream moves the code, the update
    **aborts** and the installed build stays.
-2. **Boot environment** (`lib/files/boot-env.cjs`). This runs first in the app. It
-   switches T3's telemetry and updater off a second time, and Claude Code's telemetry,
-   error reporting and other non-essential traffic for every CLI the app starts. It also
-   points the app at `~/.t3blackout`.
+2. **Boot environment** (`lib/files/boot-env.ts`). This runs first in the app.
+   - It switches T3's telemetry off a second time.
+   - It switches off the agent CLIs' own analytics and crash reporting where a switch
+     exists: Claude Code, Grok, Pi, Muse, and Bun's crash reporter (which OpenCode uses).
+     Codex only takes launch flags, so a rule adds them to every Codex launch.
+   - On Linux and Windows it turns off Electron's spellchecker, which would otherwise
+     download dictionaries from Google.
+   - It points the app at `~/.t3blackout`.
 3. **Content-Security-Policy.** The UI can only talk to loopback, so remote images, CDN
    icons and anything upstream adds to the page fail into their existing fallbacks.
 4. **Build verification.** The desktop app is typechecked, so the injected updater still
@@ -47,9 +51,12 @@ Codex's and Claude Code's own sandboxes work normally.
 Every update is a full rebuild from upstream source through the steps above. Nothing
 prebuilt is ever downloaded.
 
-- **Daily, at 04:00.** It builds the newest release on your update track. If T3 Blackout
-  is closed, the new build is installed right away. If it's open, the build waits, and the
-  update button in the sidebar offers a restart into it.
+- **Daily, at 04:00.** It builds the newest release on your update track that is at least
+  **48 hours old**. That trailing window gives a bad upstream release time to be noticed
+  and pulled before it reaches your machines. If T3 Blackout is closed, the new build is
+  installed right away. If it's open, the build waits, and the update button in the
+  sidebar offers a restart into it. To change the window, set `T3BLACKOUT_SOAK_HOURS` or
+  pass `--soak-hours`; `--ref` skips it.
 - **Update button (sidebar, app menu, Settings → About).** "Check for updates" fetches
   upstream's tags. If there's a newer release, the button shows it with upstream's commit
   titles as release notes. Clicking it builds the release; the progress ring tracks the
@@ -63,6 +70,37 @@ prebuilt is ever downloaded.
 - **A failed build** leaves the installed app alone. You get a notification with the
   reason, and the full log is in `state/t3blackout.log`.
 
+### Separate build account
+
+Every build runs upstream's dependency install scripts and build scripts. That's code
+you haven't read, running unattended at 04:00. So `install.sh` creates an unprivileged
+account, `_t3blackout`, and the fetch, build and smoke test run as it:
+
+- **Where its files live:** `/private/var/t3blackout-build` on macOS,
+  `/var/lib/t3blackout-build` on Linux. That holds the upstream mirror, the build
+  checkout and its own pnpm store. It can't read your home folder, SSH keys or
+  credentials.
+- **How it's started:** through one sudo rule, `<you> ALL=(_t3blackout) NOPASSWD: ALL`.
+  The rule only works in one direction: you can act as the build account, and it can't
+  act as you or as root.
+- **What it hands back:** an unsigned app. You scan it again, sign it and install it.
+- **What it doesn't protect:** the app itself still runs as you, so this guards the build,
+  not what upstream's code does at runtime.
+- **Without sudo:** builds run as you, and `status` says so.
+
+### Updates to T3 Blackout itself
+
+Before building, the daily run fast-forwards this clone to origin's `main`. It only
+does so if every new commit is signed by a key listed in `.allowed_signers`, checked
+against that file as it is on the machine, not as the incoming commits would have it.
+That's how a rule fix pushed from one machine reaches the others, without letting
+someone who gets into the GitHub account push code that every machine runs.
+
+- **The trusted key** is your SSH commit-signing key, which lives in 1Password.
+- **Fetching** uses the GitHub CLI's stored login, so it never waits on an SSH-agent
+  prompt.
+- **Refusals:** unsigned or rewritten history is refused, and you get a notification.
+
 ## Install
 
 Each machine builds its own copy from the same upstream tag.
@@ -72,9 +110,9 @@ gh repo clone bmjcoding/t3blackout && cd t3blackout   # any path works
 ./install.sh
 ```
 
-`install.sh` is safe to rerun. It installs what's missing, builds, verifies,
-smoke-tests and installs the app, then schedules the daily update at 04:00
-(`T3BLACKOUT_UPDATE_HOUR` to change it).
+`install.sh` is safe to rerun. It installs what's missing, sets up the build account
+(sudo asks for your password once), builds, verifies, smoke-tests and installs the app,
+then schedules the daily update at 04:00 (`T3BLACKOUT_UPDATE_HOUR` to change it).
 
 **macOS** (Apple silicon or Intel):
 
@@ -88,10 +126,9 @@ smoke-tests and installs the app, then schedules the daily update at 04:00
 **Linux** (Omarchy/Arch, Ubuntu/Debian, Fedora/RHEL; x64 or arm64):
 
 - **System packages:** build tools and libsecret, with pacman, apt or dnf.
-- **Into your home directory, so distro versions don't matter:**
-  - Node 24: official tarball, checksum-verified.
-  - pnpm: in `~/.local`.
-  - Rust: via rustup.
+- **Node 24:** the official tarball, checksum-verified, into your home directory, so the
+  distro's version doesn't matter. The build account gets its own copy of Node, pnpm and
+  Rust (via rustup) in its own home.
 - **Ubuntu 23.10+:** adds a one-line AppArmor profile so Electron's own sandbox can
   start under Ubuntu's user-namespace restriction.
 - **Signing:** none. Linux keyrings don't tie access to an app's signature.
@@ -101,8 +138,8 @@ smoke-tests and installs the app, then schedules the daily update at 04:00
 ## Commands
 
 ```sh
-bin/t3blackout update            # newest release on your track → strip → build → verify → smoke → install
-bin/t3blackout update --channel nightly|preview|stable   # or --ref <tag|sha>
+bin/t3blackout update            # newest soaked release on your track → strip → build → verify → smoke → install
+bin/t3blackout update --channel nightly|preview|stable   # or --ref <tag|sha>; --soak-hours N
 bin/t3blackout poll              # is there a newer release? (--offline: don't fetch)
 bin/t3blackout check             # dry-run the rules against latest upstream (no build)
 bin/t3blackout smoke             # re-run the zero-egress smoke test on the last build
@@ -189,9 +226,12 @@ causes are:
 ## Limits, stated plainly
 
 - **Network isn't enforced at runtime.** T3's own code is verified silent on every
-  update. Harness CLIs (Claude Code, Codex…) talk to their providers directly; Claude
-  Code's non-essential traffic is switched off by environment variable, and what the
-  agents themselves reach is up to their sandboxes or yours.
+  update. The agent CLIs talk to their providers directly. Their own analytics are
+  switched off where they offer a switch, and what the agents reach is up to their
+  sandboxes or yours. Two have no switch:
+  - **Cursor:** its SDK runs inside T3's server and reports usage events to Cursor's API,
+    the same host it needs for everything else.
+  - **Antigravity:** telemetry is controlled only by your Google account's settings.
 - **The smoke test sees Node networking only.** It can't see native code or other
   programs. That's fine for T3's own code, which is JavaScript, but it isn't a
   general egress monitor.
@@ -206,6 +246,8 @@ causes are:
   - Ubuntu's AppArmor profile,
   - real RHEL's `subscription-manager` step.
 - **Upstream trust.** You're still running upstream's code and its npm dependency tree.
-  Dependency install scripts are limited to upstream's pnpm `allowBuilds` list and the
-  lockfile pins exact versions. This removes their telemetry; it doesn't audit
-  everything else.
+  This removes their telemetry; it doesn't audit everything else. What limits the damage:
+  - Dependency install scripts are limited to upstream's pnpm `allowBuilds` list, and the
+    lockfile pins exact versions.
+  - Builds wait 48 hours and run as the separate build account.
+  - The app you run is still upstream's code, running as you.

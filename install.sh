@@ -9,9 +9,12 @@
 #   identity from 1Password (from your Apple Development certificate on the
 #   first Mac), builds, installs.
 # Linux (Omarchy/Arch, Ubuntu/Debian, Fedora/RHEL): installs system packages
-#   with the distro package manager and Node 24, pnpm and Rust into your home
-#   directory, then builds and installs. No signing step: Linux keyrings don't
-#   tie access to an app's signature.
+#   with the distro package manager and Node 24 into your home directory, then
+#   builds and installs. No signing step: Linux keyrings don't tie access to an
+#   app's signature.
+# Both: creates a separate, unprivileged build account (_t3blackout) so the
+#   daily build's dependency and build scripts can't read your home. Needs sudo
+#   once; without it, builds run as you.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -146,14 +149,6 @@ linux_setup() {
 
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$NODE_HOME/bin:$PATH"
   node_ok || install_node
-  if ! have pnpm; then
-    say "Installing pnpm into ~/.local"
-    npm install --global --prefix "$HOME/.local" pnpm >/dev/null
-  fi
-  if ! have cargo; then
-    say "Installing Rust (rustup, minimal profile)"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path >/dev/null
-  fi
 
   # Ubuntu 23.10+ blocks unprivileged user namespaces, which Electron's own
   # (Chromium) sandbox needs. Allow them for exactly the installed binary; its
@@ -175,12 +170,110 @@ EOF
   fi
 }
 
+# --- build account ----------------------------------------------------------------
+BUILDER=_t3blackout
+if [[ "$(uname -s)" == Darwin ]]; then
+  BUILDER_HOME=/private/var/t3blackout-build
+else
+  BUILDER_HOME=/var/lib/t3blackout-build
+fi
+
+builder_user_mac() {
+  dscl . -read "/Users/$BUILDER" >/dev/null 2>&1 && return
+  local id=450
+  while dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$id" ||
+    dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$id"; do
+    id=$((id + 1))
+  done
+  sudo dscl . -create "/Groups/$BUILDER"
+  sudo dscl . -create "/Groups/$BUILDER" PrimaryGroupID "$id"
+  sudo dscl . -create "/Groups/$BUILDER" RealName "T3 Blackout builder"
+  sudo dscl . -create "/Users/$BUILDER"
+  sudo dscl . -create "/Users/$BUILDER" UniqueID "$id"
+  sudo dscl . -create "/Users/$BUILDER" PrimaryGroupID "$id"
+  sudo dscl . -create "/Users/$BUILDER" UserShell /usr/bin/false
+  sudo dscl . -create "/Users/$BUILDER" NFSHomeDirectory "$BUILDER_HOME"
+  sudo dscl . -create "/Users/$BUILDER" RealName "T3 Blackout builder"
+  sudo dscl . -create "/Users/$BUILDER" Password '*'
+  sudo dscl . -create "/Users/$BUILDER" IsHidden 1
+}
+
+builder_user_linux() {
+  id "$BUILDER" >/dev/null 2>&1 && return
+  sudo useradd --system --home-dir "$BUILDER_HOME" --create-home \
+    --shell "$(command -v nologin || echo /bin/false)" --comment "T3 Blackout builder" "$BUILDER"
+}
+
+# Runs a command as the build account, with its own tools first on PATH.
+as_builder() {
+  sudo -n -u "$BUILDER" -H env HOME="$BUILDER_HOME" \
+    PATH="$BUILDER_HOME/node/bin:$BUILDER_HOME/.local/bin:$BUILDER_HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$@"
+}
+
+setup_builder() {
+  if ((EUID == 0)); then
+    say "Running as root, so there's no separate build account; builds run as root"
+    return 1
+  fi
+  have sudo || { say "sudo isn't installed, so builds run as you"; return 1; }
+  say "Setting up the build account $BUILDER (sudo asks for your password)"
+  sudo -v || { say "No sudo, so builds run as you"; return 1; }
+  case "$(uname -s)" in
+    Darwin) builder_user_mac ;;
+    *) builder_user_linux ;;
+  esac
+  sudo install -d -o "$BUILDER" -g "$(id -gn "$BUILDER")" -m 755 "$BUILDER_HOME"
+  # Lets you (and the daily job) act as the build account without a password.
+  # Only in that direction: the build account gets no sudo at all.
+  local rule
+  rule="$(mktemp)"
+  printf '%s ALL=(%s) NOPASSWD: ALL\n' "$(id -un)" "$BUILDER" >"$rule"
+  sudo visudo -cf "$rule" >/dev/null || die "the sudo rule for $BUILDER didn't validate"
+  sudo install -m 440 -o root -g "$(id -gn root)" "$rule" /etc/sudoers.d/t3blackout
+  rm -f "$rule"
+  sudo -n -u "$BUILDER" true 2>/dev/null ||
+    die "sudo can't switch to $BUILDER; make sure /etc/sudoers includes /etc/sudoers.d"
+
+  # Its own toolchain where yours lives in your home (which it can't read).
+  if [[ "$(uname -s)" == Linux ]]; then
+    as_builder bash -c "$(declare -f say die install_node); NODE_MAJOR=$NODE_MAJOR NODE_HOME=$BUILDER_HOME/node; node_ok() { [[ -x \$NODE_HOME/bin/node ]]; }; node_ok || install_node"
+    if [[ ! -x "$BUILDER_HOME/.cargo/bin/cargo" ]]; then
+      say "Installing Rust for $BUILDER"
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+        as_builder sh -s -- -y --profile minimal --no-modify-path >/dev/null
+    fi
+  fi
+  if [[ ! -x "$BUILDER_HOME/.local/bin/pnpm" ]]; then
+    say "Installing pnpm for $BUILDER"
+    as_builder npm install --global --prefix "$BUILDER_HOME/.local" pnpm >/dev/null
+  fi
+  # Hand over the mirror already fetched here, so the first build doesn't clone again.
+  if [[ -d build/upstream/.git && ! -d "$BUILDER_HOME/upstream" ]]; then
+    tar -C build -cf - upstream | as_builder tar -C "$BUILDER_HOME" -xf -
+  fi
+  as_builder touch "$BUILDER_HOME/.t3blackout-builder"
+  # Build data from before the build account existed; it keeps its own now.
+  rm -rf upstream build
+}
+
 # --- main -----------------------------------------------------------------------
 case "$(uname -s)" in
   Darwin) mac_setup ;;
   Linux) linux_setup ;;
   *) die "unsupported OS: $(uname -s)" ;;
 esac
+
+if ! setup_builder; then
+  # Building as you needs pnpm and Rust here too.
+  if ! have pnpm; then
+    say "Installing pnpm into ~/.local"
+    npm install --global --prefix "$HOME/.local" pnpm >/dev/null
+  fi
+  if ! have cargo; then
+    say "Installing Rust (rustup, minimal profile)"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path >/dev/null
+  fi
+fi
 
 say "Building and installing T3 Blackout (a few minutes on first run)"
 bin/t3blackout update
