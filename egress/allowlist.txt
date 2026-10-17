@@ -1,0 +1,44 @@
+# t3blackout egress allowlist. Everything not listed here is refused by egress/proxy.mjs.
+# Format: `host`, `host:port`, or `*.suffix` (matches subdomains only, not the apex).
+# Only ports 443 and 80 are ever allowed. The proxy reloads this file on save.
+#
+# Nothing on *.t3.codes, posthog, axiom, clerk, sentry, etc. belongs here.
+# Run `bin/t3blackout denials` to see what the app tried to reach and was refused.
+
+# --- Claude Code / Anthropic ------------------------------------------------
+api.anthropic.com
+claude.ai
+console.anthropic.com
+platform.claude.com
+# Claude Code's own telemetry/error reporting. Left off on purpose; the launcher
+# also sets DISABLE_TELEMETRY / DISABLE_ERROR_REPORTING for the CLI.
+# statsig.anthropic.com
+# *.sentry.io
+
+# --- Codex / OpenAI ---------------------------------------------------------
+api.openai.com
+auth.openai.com
+chatgpt.com
+
+# --- Gemini / Antigravity (Google) ------------------------------------------
+generativelanguage.googleapis.com
+cloudcode-pa.googleapis.com
+oauth2.googleapis.com
+accounts.google.com
+www.googleapis.com
+
+# --- Cursor -----------------------------------------------------------------
+# api2.cursor.sh
+# *.cursor.sh
+
+# --- Git hosting (PR features, git over HTTPS; :22 is git over SSH) ---------
+github.com
+github.com:22
+api.github.com
+codeload.github.com
+objects.githubusercontent.com
+raw.githubusercontent.com
+avatars.githubusercontent.com
+
+# --- Package registries (only needed if agents install deps) -----------------
+registry.npmjs.org

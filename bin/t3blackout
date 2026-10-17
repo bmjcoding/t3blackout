@@ -1,0 +1,768 @@
+#!/usr/bin/env node
+// t3blackout: build upstream T3 Code with every phone-home stripped, and run it in a
+// fail-closed egress sandbox.
+//
+//   t3blackout update [--ref <tag|branch|sha>] [--channel nightly|preview|stable] [--force]
+//   t3blackout check  [--ref ...]      apply strip rules to latest upstream without building
+//   t3blackout launch                  start the egress proxy and the app inside Seatbelt
+//   t3blackout serve [--port 3780]     server-only: sandboxed server, UI in your own browser
+//   t3blackout smoke                   re-run the zero-egress smoke test on the installed app
+//   t3blackout denials [-n 50]         what the app tried to reach and was refused
+//   t3blackout status                  installed version, proxy state
+//   t3blackout rollback                swap back to the previously installed build
+//   t3blackout schedule [--hour 4] | unschedule   daily update via launchd
+//   t3blackout uninstall              remove both LaunchAgents (keeps app and data)
+//   t3blackout signing init|import|status [--vault V]   shared signing cert via 1Password
+
+import * as childProcess from "node:child_process";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
+import { parseArgs } from "node:util";
+
+import { applyRules, scanForbidden } from "../lib/strip-engine.mjs";
+import { forbiddenInBuild, makeRules } from "../lib/rules.mjs";
+
+const ROOT = path.dirname(path.dirname(fs.realpathSync(new URL(import.meta.url).pathname)));
+const LAUNCHER = path.join(ROOT, "bin", "t3blackout");
+const UPSTREAM_URL = "https://github.com/pingdotgg/t3code.git";
+const MIRROR = path.join(ROOT, "upstream");
+const WORK = path.join(ROOT, "build", "work");
+const STATE = path.join(ROOT, "state");
+const APPS = path.join(os.homedir(), "Applications");
+const APP = path.join(APPS, "T3 Blackout.app");
+const APP_PREVIOUS = path.join(APPS, ".T3 Blackout.previous.app");
+const APP_BINARY = path.join(APP, "Contents", "MacOS", "T3 Blackout");
+const PROFILE = path.join(ROOT, "sandbox", "t3blackout.sb");
+const CANARY = path.join(ROOT, "sandbox", "canary");
+const SANDBOX_ARGS = ["-f", PROFILE, "-D", `T3BLACKOUT_CANARY=${CANARY}`];
+const RUNTIME_ALLOWLIST = path.join(ROOT, "egress", "allowlist.txt");
+const BUILD_ALLOWLIST = path.join(ROOT, "egress", "build-allowlist.txt");
+const PROXY = path.join(ROOT, "egress", "proxy.mjs");
+const RUNTIME_PORT = Number(process.env.T3BLACKOUT_PROXY_PORT ?? 18080);
+const BUILD_PORT = RUNTIME_PORT + 1;
+const SMOKE_PORT = RUNTIME_PORT + 2;
+const SMOKE_ALLOWLIST = path.join(ROOT, "egress", "smoke-allowlist.txt");
+const SIGNING_KEYCHAIN = path.join(STATE, "signing.keychain-db");
+const SIGNING_KEYCHAIN_PASS = path.join(STATE, "signing.keychain-pass");
+const SIGNING_CN = "T3 Blackout Local Signing";
+const OP_ITEM = "T3 Blackout code signing";
+// The p12 only ever travels inside 1Password, which is what protects it; this
+// passphrase exists because `security import` rejects passphrase-less p12s.
+const P12_PASSPHRASE = "t3blackout";
+const T3B_HOME = process.env.T3BLACKOUT_HOME ?? path.join(os.homedir(), ".t3blackout");
+// The app never fetches this at runtime (rule server/litellm-rates-off). Each
+// update downloads it through the build proxy and seeds the app's rate cache,
+// so usage cost estimates keep working.
+const LITELLM_RATES_URL =
+  "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const PRICING_DOWNLOAD = path.join(STATE, "litellm-rates.json");
+const LAUNCHD_LABEL = "dev.t3blackout.update";
+// Kickstarted by the app's boot guard when it's opened from Finder/Dock.
+const LAUNCH_AGENT_LABEL = "dev.t3blackout.launch";
+
+fs.mkdirSync(STATE, { recursive: true });
+
+// ------------------------------------------------------------------ helpers --
+
+function log(message) {
+  const line = `[t3blackout ${new Date().toISOString()}] ${message}`;
+  console.log(line);
+  fs.appendFileSync(path.join(STATE, "t3blackout.log"), line + "\n");
+}
+
+function run(cmd, args, opts = {}) {
+  const result = childProcess.spawnSync(cmd, args, { stdio: "inherit", ...opts });
+  if (result.status !== 0) {
+    throw new Error(`${cmd} ${args.join(" ")} exited with ${result.status ?? result.signal}`);
+  }
+  return result;
+}
+
+function capture(cmd, args, opts = {}) {
+  const result = childProcess.spawnSync(cmd, args, { encoding: "utf8", ...opts });
+  if (result.status !== 0) throw new Error(`${cmd} ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+function notify(title, message) {
+  childProcess.spawnSync("osascript", [
+    "-e",
+    `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)}`,
+  ]);
+}
+
+function readJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function portOpen(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, "127.0.0.1");
+    socket.once("connect", () => (socket.destroy(), resolve(true)));
+    socket.once("error", () => resolve(false));
+  });
+}
+
+/** Starts egress/proxy.mjs detached unless something already listens on the port. */
+async function ensureProxy(port, allowlist, name) {
+  if (await portOpen(port)) return;
+  const logFile = path.join(STATE, `egress-${name}.jsonl`);
+  const child = childProcess.spawn(
+    process.execPath,
+    [PROXY, "--port", String(port), "--allowlist", allowlist, "--log", logFile],
+    { detached: true, stdio: "ignore" },
+  );
+  child.unref();
+  fs.writeFileSync(path.join(STATE, `proxy-${name}.pid`), String(child.pid));
+  for (let i = 0; i < 50; i++) {
+    if (await portOpen(port)) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`egress proxy (${name}) did not start on 127.0.0.1:${port}`);
+}
+
+/** Env that routes everything a child might do through the egress proxy. */
+function proxiedEnv(port, base = process.env) {
+  const proxy = `http://127.0.0.1:${port}`;
+  return {
+    ...base,
+    HTTPS_PROXY: proxy,
+    HTTP_PROXY: proxy,
+    https_proxy: proxy,
+    http_proxy: proxy,
+    ALL_PROXY: proxy,
+    NO_PROXY: "localhost,127.0.0.1,::1",
+    no_proxy: "localhost,127.0.0.1,::1",
+    NODE_USE_ENV_PROXY: "1",
+    ELECTRON_GET_USE_PROXY: "1",
+    GLOBAL_AGENT_HTTPS_PROXY: proxy,
+    // git over SSH tunnels through the proxy's CONNECT (needs `host:22` allowlisted).
+    GIT_SSH_COMMAND: `ssh -o ProxyCommand="nc -X connect -x 127.0.0.1:${port} %h %p"`,
+    T3BLACKOUT_PROXY_PORT: String(port),
+  };
+}
+
+// --------------------------------------------------------------- upstream --
+
+function fetchUpstream() {
+  if (!fs.existsSync(path.join(MIRROR, ".git"))) {
+    run("git", ["clone", "--quiet", UPSTREAM_URL, MIRROR]);
+  }
+  run("git", ["-C", MIRROR, "fetch", "--quiet", "--tags", "--force", "origin"]);
+}
+
+/** Newest upstream release tag on a channel; tags look like v0.1.1-nightly.20261017.3234. */
+function resolveRef(channel) {
+  const pattern = { nightly: "v*-nightly.*", preview: "v*-preview.*", stable: "v[0-9]*" }[channel];
+  if (!pattern) throw new Error(`unknown channel ${channel}`);
+  const tags = capture("git", ["-C", MIRROR, "tag", "--list", pattern, "--sort=-creatordate"])
+    .split("\n")
+    .filter((tag) => channel !== "stable" || /^v\d+\.\d+\.\d+$/.test(tag));
+  if (!tags[0]) throw new Error(`no ${channel} tags upstream`);
+  return tags[0];
+}
+
+function checkoutWork(ref) {
+  if (fs.existsSync(WORK)) {
+    run("git", ["-C", MIRROR, "worktree", "remove", "--force", WORK]);
+  }
+  run("git", ["-C", MIRROR, "worktree", "prune"]);
+  run("git", ["-C", MIRROR, "worktree", "add", "--quiet", "--detach", WORK, ref]);
+  // Upstream's .env.example holds production Clerk/relay values; a stray .env
+  // would bake them in. The rules already force those constants empty.
+  for (const name of [".env", ".env.local"]) fs.rmSync(path.join(WORK, name), { force: true });
+  return capture("git", ["-C", WORK, "rev-parse", "HEAD"]);
+}
+
+/** `which node` (e.g. /opt/homebrew/bin/node) survives `brew upgrade`; execPath is a versioned Cellar path. */
+function stableNodePath() {
+  const found = childProcess.spawnSync("/usr/bin/which", ["node"], { encoding: "utf8" }).stdout?.trim();
+  return found && fs.existsSync(found) ? found : process.execPath;
+}
+
+function strip() {
+  log("applying strip rules");
+  const failures = applyRules(WORK, makeRules({ launcherPath: LAUNCHER, nodePath: stableNodePath(), canaryPath: CANARY }));
+  if (failures.length) {
+    throw new Error(
+      `${failures.length} strip rule(s) no longer match upstream. Nothing was installed.\n` +
+        failures.map((f) => `  - ${f}`).join("\n") +
+        "\nUpdate lib/rules.mjs for the new upstream code, then rerun.",
+    );
+  }
+}
+
+// ------------------------------------------------------------------ build --
+
+/** Build-time env: no cloud keys, no publish tokens, everything via the build proxy. */
+function buildEnv() {
+  const keep = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "TERM"];
+  const base = Object.fromEntries(keep.filter((k) => process.env[k]).map((k) => [k, process.env[k]]));
+  return proxiedEnv(BUILD_PORT, {
+    ...base,
+    CI: "1",
+    T3CODE_DESKTOP_SIGNED: "false",
+    CSC_IDENTITY_AUTO_DISCOVERY: "false",
+    T3CODE_TELEMETRY_ENABLED: "false",
+    T3CODE_OTEL_SDK_DISABLED: "true",
+  });
+}
+
+function sandboxed(cmd, args, opts) {
+  return run("/usr/bin/sandbox-exec", [...SANDBOX_ARGS, cmd, ...args], opts);
+}
+
+async function build() {
+  await ensureProxy(BUILD_PORT, BUILD_ALLOWLIST, "build");
+  const env = buildEnv();
+  const opts = { cwd: WORK, env };
+  log("installing dependencies (sandboxed, build allowlist)");
+  sandboxed("pnpm", ["install", "--frozen-lockfile"], opts);
+  log("building desktop app (sandboxed, unsigned, arm64)");
+  sandboxed(
+    process.execPath,
+    ["scripts/build-desktop-artifact.ts", "--platform", "mac", "--target", "dir", "--arch", "arm64", "--keep-stage"],
+    opts,
+  );
+}
+
+const STAGE_PREFIX = "t3code-desktop-mac-stage-";
+const stageDirs = () =>
+  new Set(
+    fs
+      .readdirSync(os.tmpdir())
+      .filter((name) => name.startsWith(STAGE_PREFIX))
+      .map((name) => path.join(os.tmpdir(), name)),
+  );
+
+/** `--keep-stage` leaves the .app in $TMPDIR/t3code-desktop-mac-stage-*; only look in ours. */
+function fetchPricing() {
+  try {
+    sandboxed("/usr/bin/curl", ["-fsSL", "--max-time", "60", "-x", `http://127.0.0.1:${BUILD_PORT}`, "-o", PRICING_DOWNLOAD, LITELLM_RATES_URL], {
+      stdio: "ignore",
+    });
+  } catch {
+    log("warning: could not download the pricing table; cost estimates keep the previous one");
+  }
+}
+
+/** Writes the app's usage-model-rates.json cache in the format UsageService reads. */
+function seedPricing() {
+  try {
+    const document = JSON.parse(fs.readFileSync(PRICING_DOWNLOAD, "utf8"));
+    if (typeof document !== "object" || document === null || Object.keys(document).length < 100) return;
+    const target = path.join(T3B_HOME, "userdata", "usage-model-rates.json");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify({ fetchedAtMs: Date.now(), document }));
+    log(`seeded pricing for ${Object.keys(document).length} models`);
+  } catch {}
+}
+
+function findBuiltApp(ourStageDirs) {
+  const roots = [path.join(WORK, "release"), ...ourStageDirs];
+  const candidates = [];
+  const walk = (dir, depth) => {
+    if (depth > 6 || !fs.existsSync(dir)) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.name === "T3 Blackout.app") candidates.push(full);
+      else if (entry.name !== "node_modules" && !entry.name.endsWith(".app")) walk(full, depth + 1);
+    }
+  };
+  for (const root of roots) walk(root, 0);
+  candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  if (!candidates[0]) throw new Error("build finished but no 'T3 Blackout.app' was found");
+  return candidates[0];
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => resolve(port));
+    });
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Boots the server from the built .app inside Seatbelt, behind a proxy that
+ * denies everything, with a PATH that hides the harness CLIs. Anything that
+ * reaches the proxy is therefore T3's own traffic: a new phone-home upstream
+ * added that no rule knows about yet. That fails the update.
+ */
+async function smokeTest(appPath) {
+  log("smoke test: booting the built server sandboxed, all egress denied");
+  await ensureProxy(SMOKE_PORT, SMOKE_ALLOWLIST, "smoke");
+  const egressLog = path.join(STATE, "egress-smoke.jsonl");
+  const logStart = fs.existsSync(egressLog) ? fs.statSync(egressLog).size : 0;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "t3blackout-smoke-"));
+  const port = await freePort();
+  const binary = path.join(appPath, "Contents", "MacOS", "T3 Blackout");
+  const entry = path.join(appPath, "Contents", "Resources", "app.asar", "apps", "server", "dist", "bin.mjs");
+  // An empty HOME means no ~/.claude or ~/.codex credentials, so the server has
+  // no harness usage to poll and the bundled Claude SDK stays quiet. What's left
+  // is T3's own traffic. (Unstripped upstream hits PostHog and GitHub here.)
+  const env = proxiedEnv(SMOKE_PORT, {
+    HOME: home,
+    USER: process.env.USER ?? "",
+    TMPDIR: os.tmpdir(),
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    ELECTRON_RUN_AS_NODE: "1",
+    DISABLE_TELEMETRY: "1",
+    DISABLE_ERROR_REPORTING: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+  });
+  const out = fs.openSync(path.join(STATE, "smoke.log"), "w");
+  const child = childProcess.spawn(
+    "/usr/bin/sandbox-exec",
+    [...SANDBOX_ARGS, binary, entry, "--base-dir", path.join(home, "t3"), "--port", String(port), "--no-browser", "--mode", "web", home],
+    { env, stdio: ["ignore", out, out] },
+  );
+  try {
+    let html = null;
+    const deadline = Date.now() + 90_000;
+    while (html === null && Date.now() < deadline) {
+      if (child.exitCode !== null) throw new Error("server exited during smoke test; see state/smoke.log");
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) });
+        if (res.ok) html = await res.text();
+      } catch {}
+      if (html === null) await sleep(1000);
+    }
+    if (html === null) throw new Error("built server never answered GET / (hung startup?); see state/smoke.log");
+    if (!html.includes('http-equiv="Content-Security-Policy"')) {
+      throw new Error("served index.html is missing the t3blackout CSP");
+    }
+    // Background refreshes (manifests, rate tables, update checks) start after boot.
+    await sleep(20_000);
+    if (child.exitCode !== null) throw new Error("server crashed after boot; see state/smoke.log");
+  } finally {
+    // A server stuck before activation also ignores SIGTERM; don't hang on it.
+    child.kill("SIGTERM");
+    const exited = new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)));
+    if ((await Promise.race([exited.then(() => true), sleep(5000).then(() => false)])) === false) {
+      child.kill("SIGKILL");
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+  const attempts = fs.existsSync(egressLog)
+    ? fs
+        .readFileSync(egressLog, "utf8")
+        .slice(logStart)
+        .split("\n")
+        .filter((line) => line.includes('"decision"'))
+        .map((line) => JSON.parse(line))
+    : [];
+  if (attempts.length) {
+    const hosts = [...new Set(attempts.map((a) => `${a.host}:${a.port}`))];
+    throw new Error(
+      `the built app tried to reach the network on its own:\n` +
+        hosts.map((h) => `  - ${h}`).join("\n") +
+        "\nNo harness credentials are visible to this test, so this is T3's own traffic.\n" +
+        "Add a strip rule for it in lib/rules.mjs, then rerun.",
+    );
+  }
+  log("smoke test passed: server answered with CSP, zero outbound attempts");
+}
+
+function verify(appPath) {
+  log("scanning build output for forbidden endpoints");
+  const hits = scanForbidden(
+    [
+      path.join(appPath, "Contents", "Resources"),
+      path.join(WORK, "apps", "server", "dist"),
+      path.join(WORK, "apps", "web", "dist"),
+    ],
+    forbiddenInBuild,
+  );
+  if (hits.length) {
+    throw new Error(`forbidden endpoints found in build output:\n${hits.map((h) => `  - ${h}`).join("\n")}`);
+  }
+  const html = path.join(WORK, "apps", "web", "dist", "index.html");
+  if (fs.existsSync(html) && !fs.readFileSync(html, "utf8").includes("Content-Security-Policy")) {
+    throw new Error("built index.html is missing the t3blackout CSP");
+  }
+}
+
+function install(appPath) {
+  fs.mkdirSync(APPS, { recursive: true });
+  const staged = path.join(APPS, ".T3 Blackout.new.app");
+  fs.rmSync(staged, { recursive: true, force: true });
+  run("ditto", [appPath, staged]);
+  // Unsigned build; make sure Gatekeeper doesn't quarantine our own artifact.
+  childProcess.spawnSync("xattr", ["-dr", "com.apple.quarantine", staged]);
+  sign(staged);
+  fs.rmSync(APP_PREVIOUS, { recursive: true, force: true });
+  if (fs.existsSync(APP)) fs.renameSync(APP, APP_PREVIOUS);
+  fs.renameSync(staged, APP);
+  writeAgent(LAUNCH_AGENT_LABEL);
+  seedPricing();
+}
+
+// --------------------------------------------------------------- commands --
+
+async function cmdUpdate(opts) {
+  fetchUpstream();
+  const ref = opts.ref ?? resolveRef(opts.channel);
+  const sha = capture("git", ["-C", MIRROR, "rev-parse", `${ref}^{commit}`]);
+  const current = readJson(path.join(STATE, "current.json"), {});
+  if (current.sha === sha && !opts.force) {
+    log(`already on ${ref} (${sha.slice(0, 10)}); nothing to do`);
+    return;
+  }
+  log(`updating to ${ref} (${sha.slice(0, 10)})`);
+  // Stage dirs hold a full app + node_modules each. Other builds on this machine
+  // may use the same prefix, so only ever remove the ones this run created.
+  const stagesBefore = stageDirs();
+  const ourStages = () => [...stageDirs()].filter((dir) => !stagesBefore.has(dir));
+  try {
+    checkoutWork(sha);
+    strip();
+    await build();
+    fetchPricing();
+    const appPath = findBuiltApp(ourStages());
+    verify(appPath);
+    await smokeTest(appPath);
+    install(appPath);
+    const record = { ref, sha, installedAt: new Date().toISOString() };
+    fs.writeFileSync(path.join(STATE, "previous.json"), JSON.stringify(current, null, 2));
+    fs.writeFileSync(path.join(STATE, "current.json"), JSON.stringify(record, null, 2));
+    log(`installed ${ref} -> ${APP}`);
+    notify("T3 Blackout updated", `${ref} installed. Restart T3 Blackout to use it.`);
+  } catch (error) {
+    log(`update FAILED, keeping the installed build: ${error.message}`);
+    notify("T3 Blackout update failed", String(error.message).split("\n")[0]);
+    process.exitCode = 1;
+  } finally {
+    for (const dir of ourStages()) fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function cmdCheck(opts) {
+  fetchUpstream();
+  const ref = opts.ref ?? resolveRef(opts.channel);
+  log(`checking strip rules against ${ref}`);
+  checkoutWork(ref);
+  try {
+    strip();
+    log("all rules apply cleanly");
+  } catch (error) {
+    log(error.message);
+    process.exitCode = 1;
+  }
+}
+
+/** Env for the app and everything it spawns, routed through the runtime proxy. */
+function runtimeEnv() {
+  // Shells inside an official T3 Code session carry ELECTRON_RUN_AS_NODE (which
+  // would start the app as bare Node) and T3CODE_* pointing at the live ~/.t3.
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !/^(ELECTRON_|T3CODE_|T3BLACKOUT_RELAUNCHED$)/.test(key)),
+  );
+  return proxiedEnv(RUNTIME_PORT, {
+    ...inherited,
+    T3CODE_HOME: process.env.T3BLACKOUT_HOME ?? path.join(os.homedir(), ".t3blackout"),
+    T3CODE_TELEMETRY_ENABLED: "false",
+    T3CODE_OTEL_SDK_DISABLED: "true",
+    // Harness-side nonessential traffic (Claude Code). The allowlist blocks it
+    // anyway; this just stops the CLIs from retrying into the proxy.
+    DISABLE_TELEMETRY: "1",
+    DISABLE_ERROR_REPORTING: "1",
+    DISABLE_AUTOUPDATER: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+  });
+}
+
+async function cmdLaunch() {
+  if (!fs.existsSync(APP_BINARY)) throw new Error(`${APP} is not installed; run \`t3blackout update\` first`);
+  await ensureProxy(RUNTIME_PORT, RUNTIME_ALLOWLIST, "runtime");
+  const env = runtimeEnv();
+  // Exec the binary directly: `open` would hand it to launchd, outside Seatbelt.
+  // macOS refuses nested Seatbelt profiles, so Chromium's own per-process
+  // sandbox cannot initialize in here; --no-sandbox trades that renderer
+  // isolation for fail-closed egress on every process. `t3blackout serve` keeps
+  // Chromium's sandbox by running only the server in Seatbelt.
+  const child = childProcess.spawn("/usr/bin/sandbox-exec", [...SANDBOX_ARGS, APP_BINARY, "--no-sandbox"], {
+    env,
+    detached: true,
+    stdio: ["ignore", fs.openSync(path.join(STATE, "app.log"), "a"), fs.openSync(path.join(STATE, "app.log"), "a")],
+  });
+  child.unref();
+  log(`launched T3 Blackout (pid ${child.pid}) behind egress proxy :${RUNTIME_PORT}`);
+}
+
+/** Server-only mode: server + harnesses in Seatbelt, UI in your own browser. */
+async function cmdServe(opts) {
+  if (!fs.existsSync(APP_BINARY)) throw new Error(`${APP} is not installed; run \`t3blackout update\` first`);
+  await ensureProxy(RUNTIME_PORT, RUNTIME_ALLOWLIST, "runtime");
+  const env = { ...runtimeEnv(), ELECTRON_RUN_AS_NODE: "1" };
+  const entry = path.join(APP, "Contents", "Resources", "app.asar", "apps", "server", "dist", "bin.mjs");
+  const port = String(Number(opts.port ?? 3780));
+  log(`serving on http://127.0.0.1:${port} (open the pairing URL it prints in your browser)`);
+  const child = childProcess.spawn(
+    "/usr/bin/sandbox-exec",
+    [...SANDBOX_ARGS, APP_BINARY, entry, "--port", port, "--host", "127.0.0.1", "--mode", "web", os.homedir()],
+    { env, stdio: "inherit" },
+  );
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
+  await new Promise((resolve) => child.on("exit", resolve));
+}
+
+async function cmdSmoke() {
+  if (!fs.existsSync(APP)) throw new Error(`${APP} is not installed`);
+  await smokeTest(APP);
+}
+
+function cmdDenials(opts) {
+  const file = path.join(STATE, "egress-runtime.jsonl");
+  if (!fs.existsSync(file)) return console.log("no runtime egress log yet");
+  const denials = fs
+    .readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line.includes('"deny"'))
+    .slice(-Number(opts.n ?? 50));
+  console.log(denials.join("\n") || "no denials");
+}
+
+async function cmdStatus() {
+  const current = readJson(path.join(STATE, "current.json"), null);
+  console.log(`installed: ${current ? `${current.ref} (${current.sha.slice(0, 10)}) at ${current.installedAt}` : "none"}`);
+  console.log(`app:       ${fs.existsSync(APP) ? APP : "missing"}`);
+  console.log(`proxy:     ${(await portOpen(RUNTIME_PORT)) ? `listening on :${RUNTIME_PORT}` : "not running"}`);
+  const scheduled = childProcess.spawnSync("launchctl", ["list", LAUNCHD_LABEL], { encoding: "utf8" });
+  console.log(`schedule:  ${scheduled.status === 0 ? "daily (launchd)" : "off"}`);
+  const identity = signingIdentity();
+  console.log(`signing:   ${identity ? `${SIGNING_CN} (${identity.slice(0, 10)})` : "ad-hoc (run \`t3blackout signing init\`)"}`);
+}
+
+function cmdRollback() {
+  if (!fs.existsSync(APP_PREVIOUS)) throw new Error("no previous build to roll back to");
+  const tmp = path.join(APPS, ".T3 Blackout.swap.app");
+  fs.renameSync(APP, tmp);
+  fs.renameSync(APP_PREVIOUS, APP);
+  fs.renameSync(tmp, APP_PREVIOUS);
+  const current = readJson(path.join(STATE, "current.json"), {});
+  const previous = readJson(path.join(STATE, "previous.json"), {});
+  fs.writeFileSync(path.join(STATE, "current.json"), JSON.stringify(previous, null, 2));
+  fs.writeFileSync(path.join(STATE, "previous.json"), JSON.stringify(current, null, 2));
+  log(`rolled back to ${previous.ref ?? "previous build"}`);
+}
+
+// ---------------------------------------------------------------- signing --
+// Keychain "Always Allow" grants are tied to the app's signature. Ad-hoc
+// signatures change every build, so each update would prompt again. A stable
+// self-signed identity (shared across your Macs via 1Password) keeps them.
+
+function signingIdentity() {
+  if (!fs.existsSync(SIGNING_KEYCHAIN) || !fs.existsSync(SIGNING_KEYCHAIN_PASS)) return null;
+  const pass = fs.readFileSync(SIGNING_KEYCHAIN_PASS, "utf8").trim();
+  childProcess.spawnSync("security", ["unlock-keychain", "-p", pass, SIGNING_KEYCHAIN]);
+  const out = childProcess.spawnSync("security", ["find-identity", "-v", "-p", "codesigning", SIGNING_KEYCHAIN], {
+    encoding: "utf8",
+  }).stdout;
+  return /\b([0-9A-F]{40})\b "T3 Blackout Local Signing"/.exec(out ?? "")?.[1] ?? null;
+}
+
+function sign(appPath) {
+  const identity = signingIdentity();
+  if (!identity) {
+    log("no signing identity (run `t3blackout signing init` or `signing import`); signing ad-hoc, Keychain will re-prompt after this update");
+    childProcess.spawnSync("codesign", ["--force", "--deep", "--sign", "-", appPath], { stdio: "ignore" });
+    return;
+  }
+  // codesign only resolves identities from keychains on the user search list,
+  // even with --keychain. Add ours for this one call, then restore the list.
+  const searchList = capture("security", ["list-keychains", "-d", "user"])
+    .split("\n")
+    .map((line) => line.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+  run("security", ["list-keychains", "-d", "user", "-s", ...searchList, SIGNING_KEYCHAIN]);
+  try {
+    run("codesign", ["--force", "--deep", "--keychain", SIGNING_KEYCHAIN, "--sign", identity, appPath]);
+  } finally {
+    run("security", ["list-keychains", "-d", "user", "-s", ...searchList]);
+  }
+  log(`signed with ${SIGNING_CN} (${identity.slice(0, 10)})`);
+}
+
+function requireOp() {
+  if (childProcess.spawnSync("op", ["--version"]).status !== 0) {
+    throw new Error(
+      "1Password CLI not found. Install it (brew install --cask 1password-cli), then in 1Password → Settings → Developer enable \"Integrate with 1Password CLI\".",
+    );
+  }
+}
+
+/** Imports a p12 into the dedicated keychain and trusts its cert for code signing. */
+function installIdentity(p12) {
+  if (!fs.existsSync(SIGNING_KEYCHAIN)) {
+    const pass = crypto.randomBytes(24).toString("base64url");
+    fs.writeFileSync(SIGNING_KEYCHAIN_PASS, pass, { mode: 0o600 });
+    run("security", ["create-keychain", "-p", pass, SIGNING_KEYCHAIN]);
+    // No auto-lock timeout; `sign` unlocks it with the stored password anyway.
+    run("security", ["set-keychain-settings", SIGNING_KEYCHAIN]);
+  }
+  const pass = fs.readFileSync(SIGNING_KEYCHAIN_PASS, "utf8").trim();
+  run("security", ["unlock-keychain", "-p", pass, SIGNING_KEYCHAIN]);
+  run("security", ["import", p12, "-k", SIGNING_KEYCHAIN, "-P", P12_PASSPHRASE, "-T", "/usr/bin/codesign"], {
+    stdio: "ignore",
+  });
+  childProcess.spawnSync(
+    "security",
+    ["set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", pass, SIGNING_KEYCHAIN],
+    { stdio: "ignore" },
+  );
+  const certPem = path.join(path.dirname(p12), "cert.pem");
+  run("/usr/bin/openssl", ["pkcs12", "-in", p12, "-clcerts", "-nokeys", "-passin", `pass:${P12_PASSPHRASE}`, "-out", certPem], {
+    stdio: "ignore",
+  });
+  log("trusting the certificate for code signing (macOS will ask for your password once)");
+  run("security", ["add-trusted-cert", "-r", "trustRoot", "-p", "codeSign", "-k", SIGNING_KEYCHAIN, certPem]);
+  const identity = signingIdentity();
+  if (!identity) throw new Error("certificate imported but codesign still sees no valid identity");
+  log(`signing identity ready: ${SIGNING_CN} (${identity.slice(0, 10)})`);
+}
+
+async function cmdSigning(opts, sub) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "t3blackout-signing-"));
+  try {
+    if (sub === "status") {
+      const identity = signingIdentity();
+      console.log(identity ? `signing: ${SIGNING_CN} (${identity})` : "signing: not set up (ad-hoc)");
+      return;
+    }
+    requireOp();
+    const p12 = path.join(tmp, "t3blackout-signing.p12");
+    const vaultArgs = opts.vault ? ["--vault", opts.vault] : [];
+    if (sub === "init") {
+      if (childProcess.spawnSync("op", ["item", "get", OP_ITEM, ...vaultArgs], { stdio: "ignore" }).status === 0) {
+        throw new Error(`"${OP_ITEM}" already exists in 1Password; use \`t3blackout signing import\``);
+      }
+      const cnf = path.join(tmp, "cert.cnf");
+      fs.writeFileSync(
+        cnf,
+        [
+          "[req]", "distinguished_name = dn", "x509_extensions = ext", "prompt = no",
+          "[dn]", `CN = ${SIGNING_CN}`,
+          "[ext]", "basicConstraints = critical,CA:false", "keyUsage = critical,digitalSignature",
+          "extendedKeyUsage = critical,codeSigning",
+        ].join("\n"),
+      );
+      const key = path.join(tmp, "key.pem");
+      const cert = path.join(tmp, "cert-init.pem");
+      run("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:3072", "-nodes", "-keyout", key, "-out", cert, "-days", "3650", "-config", cnf], { stdio: "ignore" });
+      run("/usr/bin/openssl", ["pkcs12", "-export", "-inkey", key, "-in", cert, "-out", p12, "-passout", `pass:${P12_PASSPHRASE}`], { stdio: "ignore" });
+      log(`storing "${OP_ITEM}" in 1Password (approve in the 1Password app)`);
+      run("op", ["document", "create", p12, "--title", OP_ITEM, "--file-name", "t3blackout-signing.p12", ...vaultArgs]);
+    } else if (sub === "import") {
+      log(`fetching "${OP_ITEM}" from 1Password (approve in the 1Password app)`);
+      run("op", ["document", "get", OP_ITEM, "--out-file", p12, ...vaultArgs]);
+    } else {
+      throw new Error("usage: t3blackout signing init|import|status [--vault <name>]");
+    }
+    installIdentity(p12);
+    console.log("Builds from the next `t3blackout update` on are signed with it.");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+const agentPlist = (label) => path.join(os.homedir(), "Library", "LaunchAgents", `${label}.plist`);
+
+/** Renders launchd/<label>.plist into ~/Library/LaunchAgents and (re)loads it. */
+function writeAgent(label, replacements = {}) {
+  const plist = agentPlist(label);
+  let content = fs.readFileSync(path.join(ROOT, "launchd", `${label}.plist`), "utf8");
+  const values = {
+    __NODE__: stableNodePath(),
+    __LAUNCHER__: LAUNCHER,
+    __PATH__: process.env.PATH ?? "/usr/bin:/bin",
+    __STATE__: STATE,
+    ...replacements,
+  };
+  for (const [key, value] of Object.entries(values)) content = content.replaceAll(key, value);
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  fs.writeFileSync(plist, content);
+  childProcess.spawnSync("launchctl", ["bootout", `gui/${process.getuid()}`, plist]);
+  run("launchctl", ["bootstrap", `gui/${process.getuid()}`, plist]);
+}
+
+function removeAgent(label) {
+  childProcess.spawnSync("launchctl", ["bootout", `gui/${process.getuid()}`, agentPlist(label)]);
+  fs.rmSync(agentPlist(label), { force: true });
+}
+
+function cmdSchedule(opts) {
+  writeAgent(LAUNCHD_LABEL, { __HOUR__: String(Number(opts.hour ?? 4)) });
+  log(`daily update scheduled at ${opts.hour ?? 4}:00`);
+}
+
+function cmdUnschedule() {
+  removeAgent(LAUNCHD_LABEL);
+  log("daily update unscheduled");
+}
+
+/** Removes both LaunchAgents. Leaves the app, ~/.t3blackout and this repo alone. */
+function cmdUninstall() {
+  removeAgent(LAUNCHD_LABEL);
+  removeAgent(LAUNCH_AGENT_LABEL);
+  log("removed LaunchAgents (app and data left in place)");
+}
+
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: {
+    ref: { type: "string" },
+    channel: { type: "string", default: "nightly" },
+    force: { type: "boolean", default: false },
+    hour: { type: "string" },
+    n: { type: "string", short: "n" },
+    port: { type: "string" },
+    vault: { type: "string" },
+  },
+});
+
+const commands = {
+  update: cmdUpdate,
+  check: cmdCheck,
+  launch: cmdLaunch,
+  serve: cmdServe,
+  smoke: cmdSmoke,
+  denials: cmdDenials,
+  status: cmdStatus,
+  rollback: cmdRollback,
+  schedule: cmdSchedule,
+  unschedule: cmdUnschedule,
+  uninstall: cmdUninstall,
+  signing: (opts) => cmdSigning(opts, positionals[1]),
+};
+
+const command = commands[positionals[0] ?? "status"];
+if (!command) {
+  console.error(`unknown command: ${positionals[0]}\ncommands: ${Object.keys(commands).join(", ")}`);
+  process.exit(2);
+}
+try {
+  await command(values);
+} catch (error) {
+  log(`error: ${error.message}`);
+  process.exit(1);
+}

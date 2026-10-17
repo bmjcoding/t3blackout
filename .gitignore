@@ -1,0 +1,5 @@
+upstream/
+build/
+state/
+node_modules/
+*.log

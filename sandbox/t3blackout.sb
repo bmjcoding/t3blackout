@@ -1,0 +1,31 @@
+;; Seatbelt profile for the stripped T3 Code build and every process it spawns
+;; (Claude Code, Codex, git, shells...). Children inherit this profile and cannot
+;; drop it.
+;;
+;; Network policy is fail-closed: the only reachable sockets are loopback (where
+;; egress/proxy.mjs listens) and local unix sockets. DNS through mDNSResponder is
+;; denied too, so a process that ignores HTTPS_PROXY can't even resolve a name,
+;; and DNS can't be used as a side channel.
+;;
+;; Filesystem and process policy stays permissive (allow default) because the
+;; agents need to work on your repos; this profile is about egress.
+
+(version 1)
+(allow default)
+
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*"))
+(allow network-outbound (remote unix-socket))
+(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+
+;; Sandboxed processes may not exec setuid binaries. T3's process reaper calls
+;; /bin/ps by absolute path, and agents use ps/top too. These two only read the
+;; process table, so they run outside the profile; sudo/su/login stay blocked.
+(allow process-exec (literal "/bin/ps") (with no-sandbox))
+(allow process-exec (literal "/usr/bin/top") (with no-sandbox))
+
+;; Sandbox canary. The app's boot guard reads sandbox/canary and only starts if
+;; that read fails with EPERM, which nothing but this profile produces. (A
+;; network probe is not enough: VPN/filter extensions also answer with EPERM.)
+;; sandbox-exec refuses to run without -D T3BLACKOUT_CANARY=<path>.
+(deny file-read* (literal (param "T3BLACKOUT_CANARY")))
