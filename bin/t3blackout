@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 // t3blackout: build upstream T3 Code with every phone-home stripped.
 //
-//   t3blackout update [--ref <tag|branch|sha>] [--channel nightly|preview|stable] [--force]
+//   t3blackout update [--ref <tag|branch|sha>] [--channel nightly|preview|stable] [--force] [--stage-only]
 //   t3blackout check  [--ref ...]      apply strip rules to latest upstream without building
+//   t3blackout poll [--offline]        is a newer upstream release available?
+//   t3blackout apply [--wait-pid N]    install a staged build once the app has quit, relaunch it
 //   t3blackout smoke                   re-run the zero-egress smoke test on the last build
-//   t3blackout launch                  open the installed app
+//   t3blackout launch                  open the installed app (installs a staged build first)
 //   t3blackout status                  installed version, schedule, signing
 //   t3blackout rollback                swap back to the previously installed build
 //   t3blackout schedule [--hour 4] | unschedule   daily update (launchd / systemd timer)
 //   t3blackout signing init|import|status [--vault V]   macOS: shared signing cert via 1Password
 
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
@@ -17,7 +20,19 @@ import { parseArgs } from "node:util";
 import { smokeTest } from "../lib/smoke.mjs";
 import { applyRules, scanForbidden } from "../lib/strip-engine.mjs";
 import { forbiddenInBuild, makeRules } from "../lib/rules.mjs";
-import { MIRROR, STATE, T3B_HOME, WORK, capture, log, readJson, run } from "../lib/util.mjs";
+import {
+  LAUNCHER,
+  MIRROR,
+  STATE,
+  T3B_HOME,
+  WORK,
+  capture,
+  log,
+  readJson,
+  run,
+  sleep,
+  stableNodePath,
+} from "../lib/util.mjs";
 
 const UPSTREAM_URL = "https://github.com/pingdotgg/t3code.git";
 // The app never fetches this at runtime (rule server/litellm-rates-off). Each
@@ -25,6 +40,11 @@ const UPSTREAM_URL = "https://github.com/pingdotgg/t3code.git";
 // estimates keep working.
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+const CURRENT = path.join(STATE, "current.json");
+const PREVIOUS = path.join(STATE, "previous.json");
+const PENDING = path.join(STATE, "pending.json");
+const LOCK = path.join(STATE, "update.lock");
 
 const platform = await (async () => {
   if (process.platform === "darwin") return (await import("../lib/platform/macos.mjs")).default;
@@ -41,8 +61,26 @@ function fetchUpstream() {
   run("git", ["-C", MIRROR, "fetch", "--quiet", "--tags", "--force", "origin"]);
 }
 
+/** The app calls the stable channel "latest". */
+const cliChannel = (channel) => (channel === "latest" ? "stable" : channel);
+
+/**
+ * The update track picked in the app's Settings, resolved the way the app does:
+ * stored only once the user changes it, otherwise derived from the installed version.
+ */
+function appChannel() {
+  const settings = readJson(path.join(T3B_HOME, "userdata", "desktop-settings.json"), {});
+  const configured =
+    settings.updateChannelConfiguredByUser === true ||
+    (settings.updateChannelConfiguredByUser === undefined && settings.updateChannel === "nightly");
+  if (configured && settings.updateChannel) return cliChannel(settings.updateChannel);
+  const installed = readJson(CURRENT, {}).ref;
+  return !installed || /-nightly\./.test(installed) ? "nightly" : "stable";
+}
+
 /** Newest upstream release tag on a channel; tags look like v0.1.1-nightly.20261017.3234. */
-function resolveRef(channel) {
+function resolveRef(name) {
+  const channel = cliChannel(name);
   const pattern = { nightly: "v*-nightly.*", preview: "v*-preview.*", stable: "v[0-9]*" }[channel];
   if (!pattern) throw new Error(`unknown channel ${channel}`);
   const tags = capture("git", ["-C", MIRROR, "tag", "--list", pattern, "--sort=-creatordate"])
@@ -50,6 +88,25 @@ function resolveRef(channel) {
     .filter((tag) => channel !== "stable" || /^v\d+\.\d+\.\d+$/.test(tag));
   if (!tags[0]) throw new Error(`no ${channel} tags upstream`);
   return tags[0];
+}
+
+/** App version for a ref: the tag itself, or the nearest tag for a branch or sha. */
+function versionOf(ref, sha) {
+  if (/^v\d/.test(ref)) return ref.slice(1);
+  const tag = spawnSync("git", ["-C", MIRROR, "describe", "--tags", "--abbrev=0", sha], { encoding: "utf8" }).stdout?.trim();
+  return tag ? tag.replace(/^v/, "") : "0.0.0";
+}
+
+const commitTime = (sha) => Number(capture("git", ["-C", MIRROR, "log", "-1", "--format=%ct", sha]));
+
+/** Upstream commit titles since the installed build, in electron-updater's release-notes shape. */
+function releaseNotes(fromSha, toSha, version) {
+  if (!fromSha) return [];
+  const result = spawnSync("git", ["-C", MIRROR, "log", "--reverse", "--no-merges", "--format=- %s", `${fromSha}..${toSha}`], {
+    encoding: "utf8",
+  });
+  const note = result.status === 0 ? result.stdout.trim() : "";
+  return note ? [{ version, note }] : [];
 }
 
 function checkoutWork(ref) {
@@ -65,7 +122,8 @@ function checkoutWork(ref) {
 
 function strip() {
   log("applying strip rules");
-  const failures = applyRules(WORK, makeRules());
+  const updater = { node: stableNodePath(), launcher: LAUNCHER, path: process.env.PATH ?? "/usr/bin:/bin" };
+  const failures = applyRules(WORK, makeRules({ updater }));
   if (failures.length) {
     throw new Error(
       `${failures.length} strip rule(s) no longer match upstream. Nothing was installed.\n` +
@@ -94,12 +152,21 @@ function buildEnv() {
   };
 }
 
-function buildApp() {
+function buildApp(version) {
   const opts = { cwd: WORK, env: buildEnv() };
   log("installing dependencies");
   run("pnpm", ["install", "--frozen-lockfile"], opts);
-  log(`building desktop app (${platform.name}, unsigned)`);
-  run(process.execPath, ["scripts/build-desktop-artifact.ts", ...platform.buildArgs()], opts);
+  // The injected updater implements upstream's ElectronUpdater service; if that
+  // interface moves, stop here instead of shipping an app that fails at runtime.
+  // Upstream's own script, run directly: `pnpm run` re-verifies the install.
+  log("typechecking the desktop app");
+  const desktop = path.join(WORK, "apps", "desktop");
+  const typecheck = readJson(path.join(desktop, "package.json"), {}).scripts?.typecheck;
+  if (!typecheck) throw new Error("apps/desktop has no typecheck script anymore; update bin/t3blackout");
+  run("/bin/sh", ["-c", typecheck], { ...opts, cwd: desktop });
+  progress(50);
+  log(`building desktop app ${version} (${platform.name}, unsigned)`);
+  run(process.execPath, ["scripts/build-desktop-artifact.ts", ...platform.buildArgs(), "--build-version", version], opts);
 }
 
 function verify(staged) {
@@ -142,60 +209,222 @@ async function seedPricing() {
 
 // --------------------------------------------------------------- commands --
 
+// The app runs these commands with --json and reads `t3blackout:event {...}`
+// lines from stdout; everything else on stdout is build output.
+let jsonEvents = false;
+const emit = (event) => jsonEvents && console.log(`t3blackout:event ${JSON.stringify(event)}`);
+const progress = (percent) => emit({ type: "progress", percent });
+
+const isAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+/** Pid of the live process holding the update lock, if any. */
+function lockHolder() {
+  try {
+    const pid = Number(fs.readFileSync(LOCK, "utf8"));
+    return pid && isAlive(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One update or apply at a time: the daily job and the app can both start one. */
+function acquireLock() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(LOCK, String(process.pid), { flag: "wx" });
+      return () => fs.rmSync(LOCK, { force: true });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      const holder = lockHolder();
+      if (holder) throw new Error(`another t3blackout update is running (pid ${holder})`);
+      fs.rmSync(LOCK, { force: true });
+    }
+  }
+  throw new Error("could not take the update lock");
+}
+
+function readPending() {
+  const pending = readJson(PENDING, null);
+  return pending?.sha && fs.existsSync(platform.pendingPath) ? pending : null;
+}
+
+/** Swaps `dir` in as the installed app and records it. */
+function install(dir, { ref, sha, version }) {
+  const current = readJson(CURRENT, {});
+  platform.activate(dir);
+  if (dir !== platform.pendingPath) fs.rmSync(platform.pendingPath, { recursive: true, force: true });
+  fs.rmSync(PENDING, { force: true });
+  fs.writeFileSync(PREVIOUS, JSON.stringify(current, null, 2));
+  fs.writeFileSync(CURRENT, JSON.stringify({ ref, sha, version, installedAt: new Date().toISOString() }, null, 2));
+  log(`installed ${ref} -> ${platform.installedPath}`);
+}
+
+/** Keeps a verified build until the running app restarts into it. */
+function keepPending(dir, build) {
+  if (dir !== platform.pendingPath) {
+    fs.rmSync(platform.pendingPath, { recursive: true, force: true });
+    fs.renameSync(dir, platform.pendingPath);
+  }
+  fs.writeFileSync(PENDING, JSON.stringify({ ...build, stagedAt: new Date().toISOString() }, null, 2));
+  log(`${build.ref} is ready; it installs when T3 Blackout restarts`);
+}
+
 async function cmdUpdate(opts) {
+  const release = acquireLock();
+  try {
+    await update(opts);
+  } finally {
+    release();
+  }
+}
+
+async function update(opts) {
   fetchUpstream();
-  const ref = opts.ref ?? resolveRef(opts.channel);
+  progress(5);
+  const ref = opts.ref ?? resolveRef(opts.channel ?? appChannel());
   const sha = capture("git", ["-C", MIRROR, "rev-parse", `${ref}^{commit}`]);
-  const current = readJson(path.join(STATE, "current.json"), {});
+  const build = { ref, sha, version: versionOf(ref, sha) };
+  const current = readJson(CURRENT, {});
+  const pending = readPending();
+  // The app is never swapped while it runs; it restarts into the new build.
+  const stageOnly = () => opts["stage-only"] || platform.isRunning();
   if (current.sha === sha && !opts.force) {
     log(`already on ${ref} (${sha.slice(0, 10)}); nothing to do`);
     return;
   }
+  if (pending?.sha === sha && !opts.force) {
+    if (stageOnly()) log(`${ref} is already built and waiting for T3 Blackout to restart`);
+    else install(platform.pendingPath, pending);
+    progress(100);
+    return;
+  }
   log(`updating to ${ref} (${sha.slice(0, 10)})`);
-  const build = platform.beginBuild();
+  const stages = platform.beginBuild();
   let staged = null;
   try {
     checkoutWork(sha);
+    progress(25);
     strip();
-    buildApp();
-    staged = platform.stage(build.findArtifact());
+    buildApp(build.version);
+    progress(75);
+    staged = platform.stage(stages.findArtifact());
     verify(staged);
+    progress(80);
     await smokeTest();
+    progress(97);
     await seedPricing();
-    platform.activate(staged);
+    if (stageOnly()) {
+      keepPending(staged, build);
+      if (!jsonEvents) {
+        platform.notify("T3 Blackout update ready", `${build.version} is built. Restart T3 Blackout from the update button in its sidebar.`);
+      }
+    } else {
+      install(staged, build);
+      if (!jsonEvents) platform.notify("T3 Blackout updated", `${build.version} installed.`);
+    }
     staged = null;
-    const record = { ref, sha, installedAt: new Date().toISOString() };
-    fs.writeFileSync(path.join(STATE, "previous.json"), JSON.stringify(current, null, 2));
-    fs.writeFileSync(path.join(STATE, "current.json"), JSON.stringify(record, null, 2));
-    log(`installed ${ref} -> ${platform.installedPath}`);
-    platform.notify("T3 Blackout updated", `${ref} installed. Restart T3 Blackout to use it.`);
+    progress(100);
   } catch (error) {
     log(`update FAILED, keeping the installed build: ${error.message}`);
     platform.notify("T3 Blackout update failed", String(error.message).split("\n")[0]);
+    emit({ type: "error", message: String(error.message).split("\n")[0] });
     process.exitCode = 1;
   } finally {
     if (staged) fs.rmSync(staged, { recursive: true, force: true });
-    build.cleanup();
+    stages.cleanup();
   }
 }
 
-function cmdCheck(opts) {
-  fetchUpstream();
-  const ref = opts.ref ?? resolveRef(opts.channel);
-  log(`checking strip rules against ${ref}`);
-  checkoutWork(ref);
+/** Reports the newest upstream release on the channel if it isn't installed. */
+function cmdPoll(opts) {
+  // A running update is fetching into the mirror; read what it has.
+  if (!opts.offline && !lockHolder()) fetchUpstream();
+  let available = null;
+  if (fs.existsSync(path.join(MIRROR, ".git"))) {
+    const ref = resolveRef(opts.channel ?? appChannel());
+    const sha = capture("git", ["-C", MIRROR, "rev-parse", `${ref}^{commit}`]);
+    const current = readJson(CURRENT, {});
+    const isNewer = !current.sha || commitTime(sha) >= commitTime(current.sha);
+    if (sha !== current.sha && (isNewer || opts["allow-downgrade"])) {
+      const version = versionOf(ref, sha);
+      available = { ref, sha, version, staged: readPending()?.sha === sha, releaseNotes: releaseNotes(current.sha, sha, version) };
+    }
+  }
+  if (jsonEvents) emit({ type: "poll", update: available });
+  else if (!available) console.log("up to date");
+  else console.log(`${available.version} available${available.staged ? " (built, installs on restart)" : ""}`);
+}
+
+const waitFor = async (condition, ms) => {
+  for (const deadline = Date.now() + ms; Date.now() < deadline; await sleep(250)) {
+    if (condition()) return true;
+  }
+  return condition();
+};
+
+/** Installs the staged build if there is one and the app isn't running. */
+function applyPending() {
+  if (!readPending()) return;
+  const release = acquireLock();
   try {
+    const pending = readPending();
+    if (pending) install(platform.pendingPath, pending);
+  } finally {
+    release();
+  }
+}
+
+/** Run by the app's "restart to update": wait for it to quit, swap, relaunch. */
+async function cmdApply(opts) {
+  try {
+    const pid = Number(opts["wait-pid"]);
+    if (pid && !(await waitFor(() => !isAlive(pid), 60_000))) throw new Error(`T3 Blackout (pid ${pid}) didn't quit`);
+    if (!(await waitFor(() => !platform.isRunning(), 15_000))) throw new Error("T3 Blackout is still running");
+    applyPending();
+  } catch (error) {
+    log(`update not applied: ${error.message}; the new build stays staged`);
+    platform.notify("T3 Blackout update not applied", error.message);
+    process.exitCode = 1;
+  }
+  // Relaunch either way: the user asked for a restart.
+  platform.launch();
+}
+
+function cmdLaunch() {
+  if (!platform.isRunning()) applyPending();
+  platform.launch();
+}
+
+function cmdCheck(opts) {
+  const release = acquireLock();
+  try {
+    fetchUpstream();
+    const ref = opts.ref ?? resolveRef(opts.channel ?? appChannel());
+    log(`checking strip rules against ${ref}`);
+    checkoutWork(ref);
     strip();
     log("all rules apply cleanly");
   } catch (error) {
     log(error.message);
     process.exitCode = 1;
+  } finally {
+    release();
   }
 }
 
 function cmdStatus() {
-  const current = readJson(path.join(STATE, "current.json"), null);
+  const current = readJson(CURRENT, null);
+  const pending = readPending();
   console.log(`installed: ${current?.sha ? `${current.ref} (${current.sha.slice(0, 10)}) at ${current.installedAt}` : "none"}`);
+  if (pending) console.log(`staged:    ${pending.ref} (${pending.sha.slice(0, 10)}), installs when the app restarts`);
+  console.log(`channel:   ${appChannel()}`);
   console.log(`app:       ${fs.existsSync(platform.installedPath) ? platform.installedPath : "missing"}`);
   console.log(`schedule:  ${platform.isScheduled() ? "daily" : "off"}`);
   for (const line of platform.statusLines()) console.log(line);
@@ -203,10 +432,10 @@ function cmdStatus() {
 
 function cmdRollback() {
   platform.rollback();
-  const current = readJson(path.join(STATE, "current.json"), {});
-  const previous = readJson(path.join(STATE, "previous.json"), {});
-  fs.writeFileSync(path.join(STATE, "current.json"), JSON.stringify(previous, null, 2));
-  fs.writeFileSync(path.join(STATE, "previous.json"), JSON.stringify(current, null, 2));
+  const current = readJson(CURRENT, {});
+  const previous = readJson(PREVIOUS, {});
+  fs.writeFileSync(CURRENT, JSON.stringify(previous, null, 2));
+  fs.writeFileSync(PREVIOUS, JSON.stringify(current, null, 2));
   log(`rolled back to ${previous.ref ?? "previous build"}`);
 }
 
@@ -225,8 +454,13 @@ const { positionals, values } = parseArgs({
   allowPositionals: true,
   options: {
     ref: { type: "string" },
-    channel: { type: "string", default: "nightly" },
+    channel: { type: "string" },
     force: { type: "boolean", default: false },
+    "stage-only": { type: "boolean", default: false },
+    offline: { type: "boolean", default: false },
+    "allow-downgrade": { type: "boolean", default: false },
+    "wait-pid": { type: "string" },
+    json: { type: "boolean", default: false },
     hour: { type: "string" },
     vault: { type: "string" },
   },
@@ -235,8 +469,10 @@ const { positionals, values } = parseArgs({
 const commands = {
   update: cmdUpdate,
   check: cmdCheck,
+  poll: cmdPoll,
+  apply: cmdApply,
   smoke: () => smokeTest(),
-  launch: () => platform.launch(),
+  launch: cmdLaunch,
   status: cmdStatus,
   rollback: cmdRollback,
   schedule: cmdSchedule,
@@ -249,9 +485,11 @@ if (!command) {
   console.error(`unknown command: ${positionals[0]}\ncommands: ${Object.keys(commands).join(", ")}`);
   process.exit(2);
 }
+jsonEvents = values.json;
 try {
   await command(values);
 } catch (error) {
   log(`error: ${error.message}`);
+  emit({ type: "error", message: String(error.message).split("\n")[0] });
   process.exit(1);
 }
