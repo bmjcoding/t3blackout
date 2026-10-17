@@ -1,1 +1,0 @@
-t3blackout sandbox canary: the Seatbelt profile denies reading this file, so EPERM here proves the process is inside it.

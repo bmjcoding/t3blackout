@@ -1,3 +1,0 @@
-# Intentionally empty. During `t3blackout update`'s smoke test the built server runs
-# with no harness CLIs on PATH, so any outbound attempt is T3's own traffic and
-# fails the update.

@@ -1,0 +1,9 @@
+[Unit]
+Description=Rebuild T3 Blackout from the newest upstream nightly
+
+[Service]
+Type=oneshot
+Environment=PATH=__PATH__
+ExecStart=__NODE__ __LAUNCHER__ update
+Nice=10
+IOSchedulingClass=idle
