@@ -1,5 +1,5 @@
 // Claude desktop's working indicator, redrawn: a few dots in the theme's accent
-// colour next to a random verb. Every few seconds the verb swaps and the dots
+// color next to a random verb. Every few seconds the verb swaps and the dots
 // morph into a different motion; waiting on you has its own fixed one.
 // Written into the upstream checkout by lib/rules.mjs.
 
@@ -159,15 +159,8 @@ const MORPH_MS = 420;
 const INTRO_MS = 520;
 const VERB_MS = 3_000;
 
-const VERBS = [
-  "Thinking", "Pondering", "Mulling", "Musing", "Noodling", "Puzzling", "Imagining",
-  "Contemplating", "Considering", "Baking", "Brewing", "Cooking", "Simmering", "Stewing",
-  "Percolating", "Marinating", "Whisking", "Concocting", "Crafting", "Creating", "Sketching",
-  "Tinkering", "Doodling", "Forging", "Composing", "Hatching", "Incubating", "Vibing",
-  "Grooving", "Moonwalking", "Frolicking", "Boogieing", "Shimmying", "Moseying", "Wandering",
-  "Enchanting", "Manifesting", "Channeling", "Levitating", "Working", "Spinning", "Churning",
-  "Finagling", "Smooshing", "Wrangling",
-];
+// Filled from ClaudeSpinner.verbs.txt by lib/rules.mjs when it writes this file.
+const VERBS: readonly string[] = [/* ClaudeSpinner.verbs.txt */];
 
 interface MarkState {
   svg: SVGSVGElement;
