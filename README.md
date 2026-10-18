@@ -161,6 +161,24 @@ It also has its own:
 
 So both apps can be installed side by side.
 
+## Skills
+
+Every folder in [`skills/`](skills) ships with the app as an agent skill, invoked from
+any provider's composer: `/explain <topic>` draws the topic as a page in the thread.
+
+- On launch the app writes each skill to `~/.t3blackout/skills/<name>` and symlinks it into
+  the skills folder of every agent harness you have installed: `~/.claude/skills` (Claude,
+  Cursor), `~/.agents/skills` (Codex, Cursor, OpenCode, Muse, Copilot, Devin, goose, Auggie,
+  Gemini CLI), `~/.gemini/config/skills` (Antigravity), `~/.grok/skills`, `~/.qwen/skills`
+  and `~/.junie/skills`. A harness counts as installed when its home
+  folder exists; one installed later is linked on the next launch or when you open
+  **Settings → Skills**.
+- It only ever adds or removes its own links. A skill of yours with the same name is
+  left alone, and Settings shows it as skipped.
+- **Settings → Skills** has a switch per skill. Off removes its links.
+- A new skill is a folder with a `SKILL.md` whose frontmatter `name` matches the folder;
+  `bin/t3blackout check` rejects one that doesn't.
+
 ## Signing and Keychain prompts (macOS)
 
 T3 Blackout keeps its encryption key ("t3blackout Safe Storage") in your Keychain. macOS
