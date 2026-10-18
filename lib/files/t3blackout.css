@@ -398,8 +398,9 @@ html[data-theme-id^="blackout"] {
 /* ------------------------------------------------- chat | code switcher -- */
 
 /* BlackoutModeSwitcher.tsx: a near-clear track, and one lit thumb, styled
-   like the hover glow above, that slides to the active side. The two buttons
-   are equal width with a 2px gap inside 2px of padding (ui/toggle-group). */
+   like the hover glow above, on the active side; the component animates its
+   moves. The two buttons are equal width with a 2px gap inside 2px of
+   padding (ui/toggle-group). */
 [data-t3b-mode-switcher] {
   position: relative;
   background: color-mix(in oklab, var(--foreground) 3%, transparent);
@@ -417,7 +418,6 @@ html[data-theme-id^="blackout"] {
   box-shadow:
     0 0 0 1px color-mix(in oklab, var(--t3b-glow) 55%, transparent),
     0 0 18px color-mix(in oklab, var(--t3b-glow) 35%, transparent);
-  transition: transform 260ms cubic-bezier(0.3, 0.7, 0.2, 1);
 }
 
 [data-t3b-mode-switcher][data-mode="code"] > [data-t3b-mode-thumb] {
@@ -437,7 +437,6 @@ html[data-theme-id^="blackout"] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-t3b-mode-thumb],
   [data-t3b-mode-switcher] > button {
     transition: none;
   }

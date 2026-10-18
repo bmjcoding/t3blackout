@@ -6,8 +6,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useLocation, useParams, useRouter } from "@tanstack/react-router";
 import { CodeXmlIcon, MessagesSquareIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
 import {
   type BlackoutMode,
@@ -148,20 +147,57 @@ function useSwitchBlackoutMode() {
   );
 }
 
-// t3blackout.css's thumb transition.
 const SLIDE_MS = 260;
+const SLIDE_EASING = "cubic-bezier(0.3, 0.7, 0.2, 1)";
 
-// Switching modes swaps the sidebar, which remounts this switcher mid-slide.
-// The new one picks the slide up where the old one was, through a negative
-// transition delay, so it reads as one motion.
-let lastSlide: { readonly from: BlackoutMode; readonly to: BlackoutMode; readonly at: number } | null =
-  null;
+// The last click's mode, held until the route reaches it, so the thumb never
+// slides back while the navigation is in flight.
+let heldMode: BlackoutMode | null = null;
+const heldListeners = new Set<() => void>();
+const readHeldMode = () => heldMode;
+const subscribeHeldMode = (listener: () => void) => {
+  heldListeners.add(listener);
+  return () => heldListeners.delete(listener);
+};
+function setHeldMode(next: BlackoutMode | null) {
+  if (heldMode === next) return;
+  heldMode = next;
+  for (const listener of heldListeners) listener();
+}
 
-function slideInProgress(to: BlackoutMode) {
-  const elapsed = lastSlide === null ? SLIDE_MS : performance.now() - lastSlide.at;
-  return lastSlide !== null && lastSlide.to === to && elapsed < SLIDE_MS
-    ? { from: lastSlide.from, elapsed }
-    : null;
+/** Slides the thumb from `from` (a computed transform) to where data-mode puts it. */
+function playSlide(thumb: HTMLElement, from: string) {
+  for (const animation of thumb.getAnimations()) animation.cancel();
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const to = getComputedStyle(thumb).transform;
+  if (from === to) return;
+  thumb.animate([{ transform: from }, { transform: to }], {
+    duration: SLIDE_MS,
+    easing: SLIDE_EASING,
+  });
+}
+
+// One switch at a time, and the last click wins: a chat starting slowly must
+// not land after a later switch back to code.
+let switching = false;
+let queuedMode: BlackoutMode | null = null;
+
+async function drainSwitches(run: (mode: BlackoutMode) => Promise<void>) {
+  if (switching) return;
+  switching = true;
+  try {
+    while (queuedMode !== null) {
+      const target = queuedMode;
+      queuedMode = null;
+      await run(target).catch(() => undefined);
+    }
+  } finally {
+    switching = false;
+  }
+  // A switch that lands elsewhere, or nowhere, lets go of the hold too.
+  setTimeout(() => {
+    if (!switching && queuedMode === null) setHeldMode(null);
+  }, 1500);
 }
 
 export function BlackoutModeSwitcher() {
@@ -169,54 +205,40 @@ export function BlackoutModeSwitcher() {
   const switchMode = useSwitchBlackoutMode();
   // The thumb moves on the click; the mode itself follows once the
   // navigation lands, which can take a moment when it starts a chat.
-  const [requested, setRequested] = useState<BlackoutMode | null>(null);
-  const shown = requested ?? mode;
-  const [thumb, setThumb] = useState(() => {
-    const resumed = slideInProgress(shown);
-    return resumed
-      ? { mode: resumed.from, delayMs: -resumed.elapsed }
-      : { mode: shown, delayMs: 0 };
-  });
+  const held = useSyncExternalStore(subscribeHeldMode, readHeldMode, readHeldMode);
+  const shown = held ?? mode;
   useEffect(() => {
-    if (thumb.mode === shown) return;
-    // One painted frame at the start position, then the move.
-    const frame = requestAnimationFrame(() => setThumb((current) => ({ ...current, mode: shown })));
-    return () => cancelAnimationFrame(frame);
-  }, [shown, thumb.mode]);
-  useEffect(() => {
-    if (thumb.delayMs === 0) return;
-    // A resumed slide's head start must not carry over to the next one.
-    const timer = setTimeout(() => setThumb((current) => ({ ...current, delayMs: 0 })), SLIDE_MS);
-    return () => clearTimeout(timer);
-  }, [thumb.delayMs]);
+    if (held !== null && mode === held && queuedMode === null) setHeldMode(null);
+  }, [held, mode]);
+  const thumbRef = useRef<HTMLSpanElement>(null);
   return (
     <ToggleGroup
       aria-label="Chat or code"
       className="shrink-0"
       data-t3b-mode-switcher=""
-      data-mode={thumb.mode}
+      data-mode={shown}
       variant="segmented"
       value={[shown]}
       onValueChange={(value) => {
         const next = value[0];
-        if ((next !== "chat" && next !== "code") || next === shown) return;
-        lastSlide = { from: shown, to: next, at: performance.now() };
-        // Start the slide before the navigation's render work can hold it
-        // back: commit it now, and navigate once a frame has painted.
-        flushSync(() => {
-          setRequested(next);
-          setThumb({ mode: next, delayMs: 0 });
-        });
+        const thumb = thumbRef.current;
+        if ((next !== "chat" && next !== "code") || next === shown || !thumb) return;
+        // From wherever the thumb is now, mid-slide included.
+        const from = getComputedStyle(thumb).transform;
+        // Base UI calls this mid-render, where React can't flush, so move the
+        // thumb's target directly; the render that follows sets the same.
+        if (thumb.parentElement) thumb.parentElement.dataset.mode = next;
+        playSlide(thumb, from);
+        setHeldMode(next);
+        queuedMode = next;
+        // Navigate once the slide has painted, so the navigation's render
+        // work can't hold its start back.
         requestAnimationFrame(() => {
-          setTimeout(() => void switchMode(next).finally(() => setRequested(null)), 0);
+          setTimeout(() => void drainSwitches(switchMode), 0);
         });
       }}
     >
-      <span
-        aria-hidden
-        data-t3b-mode-thumb=""
-        style={thumb.delayMs === 0 ? undefined : { transitionDelay: `${thumb.delayMs}ms` }}
-      />
+      <span aria-hidden data-t3b-mode-thumb="" ref={thumbRef} />
       <Tooltip>
         <TooltipTrigger render={<Toggle aria-label="Chat" value="chat" />}>
           <MessagesSquareIcon className="size-3.5" />
@@ -234,14 +256,23 @@ export function BlackoutModeSwitcher() {
 }
 
 /**
- * The switcher's row, under the title bar. It starts where the wordmark does
- * and is as wide (t3blackout.css: 10.445 x its 0.6875rem height), so the
- * switcher sits centered under the logo.
+ * The switcher, drawn once over the sidebar rather than in each sidebar's
+ * header: switching modes swaps the sidebar, and a switcher inside it would
+ * remount mid-slide. It sits under the title bar where the header's spacer
+ * leaves room, starting where the wordmark does and as wide (t3blackout.css:
+ * 10.445 x its 0.6875rem height), so it's centered under the logo.
  */
-export function BlackoutModeSwitcherRow() {
+export function BlackoutModeSwitcherOverlay() {
   return (
-    <div className="ml-[var(--workspace-titlebar-content-left)] flex w-[7.18rem] shrink-0 justify-center pb-1.5">
-      <BlackoutModeSwitcher />
+    <div className="pointer-events-none absolute top-[var(--workspace-topbar-height)] left-[var(--workspace-titlebar-content-left)] z-20 flex w-[7.18rem] justify-center">
+      <div className="pointer-events-auto">
+        <BlackoutModeSwitcher />
+      </div>
     </div>
   );
+}
+
+/** The room the overlay takes under the title bar: its 1.75rem plus a gap. */
+export function BlackoutModeSwitcherSpacer() {
+  return <div aria-hidden className="h-[2.125rem] shrink-0" />;
 }
