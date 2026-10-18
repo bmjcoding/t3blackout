@@ -1,0 +1,58 @@
+/* Styles for ClaudeSpinner.tsx. Timings follow Claude desktop's indicator. */
+
+.t3b-mark {
+  color: var(--app-theme-accent, var(--primary));
+  transition: color 300ms ease-out;
+}
+
+.t3b-mark[data-blocked] {
+  color: var(--warning, var(--app-theme-accent, var(--primary)));
+}
+
+.t3b-mark circle {
+  transition: opacity 200ms ease-out;
+}
+
+.t3b-verb-box {
+  transition: width 200ms ease-out;
+}
+
+@keyframes t3b-dot-2 {
+  0%, 33.3% { opacity: 0; }
+  33.4%, to { opacity: 1; }
+}
+
+@keyframes t3b-dot-3 {
+  0%, 66.6% { opacity: 0; }
+  66.7%, to { opacity: 1; }
+}
+
+.t3b-ellipsis > span:nth-child(2) {
+  animation: 1.2s linear infinite t3b-dot-2;
+}
+
+.t3b-ellipsis > span:nth-child(3) {
+  animation: 1.2s linear infinite t3b-dot-3;
+}
+
+@keyframes t3b-pulse {
+  0%, to { opacity: 1; }
+  50% { opacity: 0.75; }
+}
+
+.t3b-pulse {
+  animation: 2s ease-in-out 3s infinite t3b-pulse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t3b-mark,
+  .t3b-verb-box {
+    transition: none;
+  }
+
+  .t3b-ellipsis > span:nth-child(n),
+  .t3b-pulse {
+    animation: none;
+    opacity: 1;
+  }
+}
