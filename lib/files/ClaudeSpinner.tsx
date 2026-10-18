@@ -1,50 +1,12 @@
 // Claude desktop's working indicator, redrawn: a few dots in the theme's accent
-// colour that move differently for each activity (thinking, reading,
-// searching, coding, writing, waiting on you), next to a random verb that
-// swaps every few seconds. Written into the upstream checkout by lib/rules.mjs.
+// colour next to a random verb. Every few seconds the verb swaps and the dots
+// morph into a different motion; waiting on you has its own fixed one.
+// Written into the upstream checkout by lib/rules.mjs.
 
 import { useEffect, useRef, type ReactNode } from "react";
 import "./ClaudeSpinner.css";
 
-// ------------------------------------------------------------- activities --
-
 type Activity = "default" | "think" | "read" | "search" | "code" | "write" | "blocked";
-
-const ACTIVITY_FOR_ICON: Record<string, Activity> = {
-  brain: "think",
-  eye: "read",
-  search: "search",
-  globe: "search",
-  browser: "search",
-  terminal: "code",
-  code: "code",
-  hammer: "code",
-  wrench: "code",
-  computer: "code",
-  device: "code",
-  "square-pen": "write",
-};
-
-// Live tool rows report what they are doing; the Working row's mark follows the
-// most recent one. Rows unregister when they finish or scroll out of the tree.
-const liveActivities = new Map<symbol, Activity>();
-
-function followedActivity(): Activity {
-  let latest: Activity = "default";
-  for (const activity of liveActivities.values()) latest = activity;
-  return latest;
-}
-
-/** Called by LiveActivityRow with its icon while the tool is running. */
-export function useReportLiveActivity(iconName: string | undefined) {
-  const activity = iconName === undefined ? undefined : (ACTIVITY_FOR_ICON[iconName] ?? "default");
-  useEffect(() => {
-    if (activity === undefined) return;
-    const key = Symbol(activity);
-    liveActivities.set(key, activity);
-    return () => void liveActivities.delete(key);
-  }, [activity]);
-}
 
 // ------------------------------------------------------------------ poses --
 
@@ -219,21 +181,24 @@ interface MarkState {
   last: Pose;
 }
 
-// One clock drives every mark and word on screen, so the Thinking and Working
-// rows stay in step. Marks are written straight to the DOM at 30 fps.
+const MOTIONS: Activity[] = ["default", "think", "read", "search", "code", "write"];
+
+// One clock drives every mark and word on screen, so they change together.
+// Marks are written straight to the DOM at 30 fps.
 const marks = new Set<MarkState>();
 const verbNodes = new Set<HTMLElement>();
 const epoch = performance.now();
 let raf = 0;
 let lastFrame = 0;
-let verb = pickVerb();
+let verb = pickOther(VERBS);
+let motion = pickOther(MOTIONS);
 let verbTimer: ReturnType<typeof setInterval> | null = null;
 
 const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-function pickVerb(previous?: string): string {
+function pickOther<T>(from: readonly T[], previous?: T): T {
   let next = previous;
-  while (next === previous) next = VERBS[Math.floor(Math.random() * VERBS.length)]!;
+  while (next === previous) next = from[Math.floor(Math.random() * from.length)]!;
   return next!;
 }
 
@@ -305,7 +270,8 @@ function swapVerb(node: HTMLElement, next: string) {
 }
 
 function nextVerb() {
-  verb = pickVerb(verb);
+  verb = pickOther(VERBS, verb);
+  motion = pickOther(MOTIONS, motion);
   for (const node of verbNodes) swapVerb(node, verb);
 }
 
@@ -320,8 +286,9 @@ function trackMark(state: Omit<MarkState, "activity" | "born" | "morphFrom" | "m
 function trackVerb(node: HTMLElement | null) {
   if (node === null) return;
   if (verbNodes.size === 0) {
-    // A new turn gets a new word.
-    verb = pickVerb(verb);
+    // A new turn gets a new word and motion.
+    verb = pickOther(VERBS, verb);
+    motion = pickOther(MOTIONS, motion);
     verbTimer = setInterval(nextVerb, VERB_MS);
   }
   verbNodes.add(node);
@@ -338,7 +305,7 @@ function trackVerb(node: HTMLElement | null) {
 
 // ------------------------------------------------------------- components --
 
-function WorkingMark({ activity, size }: { activity: Activity | "follow"; size: number }) {
+function WorkingMark({ activity, size }: { activity: Activity | "cycle"; size: number }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const activityRef = useRef(activity);
   useEffect(() => {
@@ -352,7 +319,7 @@ function WorkingMark({ activity, size }: { activity: Activity | "follow"; size: 
       svg,
       shapes: [...svg.querySelectorAll("ellipse")],
       ring: svg.querySelector("circle")!,
-      target: () => (activityRef.current === "follow" ? followedActivity() : activityRef.current),
+      target: () => (activityRef.current === "cycle" ? motion : activityRef.current),
     });
   }, []);
   return (
@@ -382,12 +349,12 @@ function Verb() {
   );
 }
 
-/** Working row: `<mark> Noodling... 12s`. The mark follows the running tool. */
+/** Working row: `<mark> Noodling... 12s`. The mark changes motion with each new verb. */
 export function ClaudeSpinnerLabel({ blocked = false, children }: { blocked?: boolean; children?: ReactNode }) {
   return (
     <span className="inline-flex items-center gap-2">
       <span className="sr-only">Working</span>
-      <WorkingMark activity={blocked ? "blocked" : "follow"} size={18} />
+      <WorkingMark activity={blocked ? "blocked" : "cycle"} size={18} />
       <Verb />
       {children ? (
         <span className="text-muted-foreground" aria-hidden>
