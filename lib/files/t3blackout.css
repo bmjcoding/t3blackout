@@ -26,9 +26,10 @@
    plus a 9px gap. They're a fixed-size 186px tile repeated rightward, so a wider
    sidebar shows more document instead of stretching the bars, and a narrower one
    crops it; the last 24px fade so cut bars don't end abruptly. */
+/* Pure black to sit flush on Ink's and Blackout's sidebar. */
 .t3b-redacted {
   position: relative;
-  background: var(--t3b-black);
+  background: #000;
 }
 
 .t3b-redacted-bars {
@@ -103,4 +104,46 @@
     0 0 0 1px rgb(255 138 61 / 8%),
     0 0 32px -6px rgb(255 120 40 / 30%),
     0 20px 60px rgb(0 0 0 / 50%);
+}
+
+/* --------------------------------------------------- main-area backdrop -- */
+
+/* Blackout's pattern behind the chat (Settings -> Appearance -> Background,
+   t3blackoutBackdrop.ts). It hangs off the chat's layout root, which doesn't
+   scroll, so the pattern stays put while messages move over it; the header and
+   timeline layers above it go clear so it shows through. Static, no repaint. */
+html[data-theme-id="blackout"]:not([data-t3b-backdrop="none"]) [data-t3b-backdrop-host] {
+  isolation: isolate;
+}
+
+html[data-theme-id="blackout"]:not([data-t3b-backdrop="none"])
+  [data-t3b-backdrop-host]
+  :is([data-chat-header], [data-t3b-backdrop-clear]) {
+  background-color: transparent;
+}
+
+html[data-theme-id="blackout"]:not([data-t3b-backdrop="none"]) [data-t3b-backdrop-host]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* A faint grid around the edges, clear behind the middle where you read. */
+html[data-theme-id="blackout"][data-t3b-backdrop="vignette"] [data-t3b-backdrop-host]::before {
+  background-image:
+    linear-gradient(rgb(255 255 255 / 6.5%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 6.5%) 1px, transparent 1px);
+  background-size: 24px 24px;
+  mask-image: radial-gradient(ellipse 75% 85% at 50% 40%, transparent 35%, #000 100%);
+  -webkit-mask-image: radial-gradient(ellipse 75% 85% at 50% 40%, transparent 35%, #000 100%);
+}
+
+/* A dot field glowing down from the top centre, gone before the composer. */
+html[data-theme-id="blackout"][data-t3b-backdrop="dots"] [data-t3b-backdrop-host]::before {
+  background-image: radial-gradient(circle, rgb(255 255 255 / 11%) 1px, transparent 1.4px);
+  background-size: 20px 20px;
+  mask-image: radial-gradient(ellipse 60% 70% at 50% 0%, #000, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 70% at 50% 0%, #000, transparent 100%);
 }
