@@ -196,3 +196,176 @@ html[data-t3b-glass] .t3b-redacted {
 html[data-t3b-glass] .sidebar-stage-backdrop {
   --stage-fade: transparent;
 }
+
+/* ------------------------------------------------------- version stamp -- */
+
+/* The build version in the window's bottom-right corner, styled as a redaction
+   stamp, with what the build changed on hover or focus. Blackout themes only. */
+.t3b-version-stamp {
+  display: none;
+}
+
+html[data-theme-id^="blackout"] .t3b-version-stamp {
+  position: fixed;
+  right: 12px;
+  bottom: 10px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 2px;
+  background: #000;
+  box-shadow: 0 0 0 1px #1d1917;
+  color: var(--t3b-ember);
+  font: 700 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  cursor: default;
+  outline: none;
+  user-select: none;
+}
+
+html[data-theme-id^="blackout"] .t3b-version-stamp:focus-visible {
+  box-shadow: 0 0 0 1px var(--t3b-ember);
+}
+
+html[data-theme-id^="blackout"] .t3b-version-stamp > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--t3b-ember);
+}
+
+/* The card sits above the stamp; its bottom padding bridges the gap so the
+   pointer can travel up into it without it closing. */
+.t3b-version-notes {
+  position: absolute;
+  right: -1px;
+  bottom: 100%;
+  display: none;
+  padding-bottom: 8px;
+}
+
+.t3b-version-stamp:is(:hover, :focus-within) .t3b-version-notes {
+  display: block;
+}
+
+.t3b-version-card {
+  width: 340px;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #121110;
+  box-shadow:
+    0 0 0 1px #2a2522,
+    0 16px 40px rgb(0 0 0 / 55%);
+  color: #ddd5ce;
+  font: 400 12px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  letter-spacing: normal;
+  user-select: text;
+}
+
+.t3b-version-card header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #221d1a;
+}
+
+.t3b-version-card header b {
+  color: var(--t3b-ember);
+  font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.t3b-version-card header small {
+  color: #857b72;
+  font-size: 11px;
+}
+
+.t3b-version-card section {
+  padding-top: 10px;
+}
+
+.t3b-version-card h4 {
+  margin: 0 0 4px;
+  color: #efe9e3;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.t3b-version-card h4 span {
+  color: #857b72;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.t3b-version-card ul {
+  margin: 0;
+  padding-left: 14px;
+}
+
+.t3b-version-card li {
+  margin: 2px 0;
+}
+
+.t3b-version-card li::marker {
+  color: var(--t3b-ember);
+}
+
+.t3b-version-card p {
+  margin: 0;
+  color: #857b72;
+}
+
+/* Pull request numbers and commit IDs, in ember. */
+.t3b-version-card a {
+  color: var(--t3b-ember);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.t3b-version-card a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.t3b-version-card code {
+  color: #857b72;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ------------------------------------------------------- icon-button glow -- */
+
+/* The send button's ring and glow, on hover, for the other icon-only buttons
+   (sidebar footer, update, attach), marked with data-t3b-glow. It takes the
+   selected theme's accent, the same one the working indicator uses; the
+   Blackout themes use the send button's own ember so the two match exactly. */
+:root {
+  --t3b-glow: var(--app-theme-accent, var(--primary));
+}
+
+html[data-theme-id^="blackout"] {
+  --t3b-glow: var(--t3b-ember);
+}
+
+[data-t3b-glow] {
+  transition:
+    box-shadow 150ms ease-out,
+    color 150ms ease-out,
+    background-color 150ms ease-out;
+}
+
+[data-t3b-glow]:hover:not(:disabled, [aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--t3b-glow) 12%, transparent);
+  color: var(--t3b-glow);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--t3b-glow) 55%, transparent),
+    0 0 18px color-mix(in oklab, var(--t3b-glow) 35%, transparent);
+}

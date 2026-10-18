@@ -1,7 +1,11 @@
 // Injected by t3blackout. The sidebar wordmark and the nightly stage art; the
 // art is styled in t3blackout.css.
 
-import { useId } from "react";
+import { useId, type MouseEvent, type ReactNode } from "react";
+
+import { openDesktopUpdateReleaseNotes } from "./desktopUpdate.toast";
+import { useDesktopUpdateState } from "../state/desktopUpdate";
+import { T3BLACKOUT_BUILD } from "../t3blackoutBuild";
 
 // T3 is upstream's T3Wordmark glyph, untouched, scaled from its 56-unit cap.
 // BLACKOUT is lettered after the Black Ops II logo on a 100-unit cap: wide,
@@ -59,6 +63,126 @@ export function BlackoutRedactedArt() {
     <div aria-hidden="true" className="t3b-redacted h-full w-full" data-stage-art="nightly">
       <div className="t3b-redacted-bars">
         <span className="t3b-redacted-strike" />
+      </div>
+    </div>
+  );
+}
+
+type Change = (typeof T3BLACKOUT_BUILD)["upstream"]["items"][number];
+
+/** Opens in the browser: through the desktop shell in the app, a new tab on the web. */
+function openLink(event: MouseEvent<HTMLAnchorElement>) {
+  event.preventDefault();
+  const url = event.currentTarget.href;
+  if (window.desktopBridge) void openDesktopUpdateReleaseNotes(window.desktopBridge, url);
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function ExternalLink({ href, children }: { readonly href: string; readonly children: string }) {
+  return (
+    <a href={href} onClick={openLink} rel="noreferrer" target="_blank">
+      {children}
+    </a>
+  );
+}
+
+/** An upstream title with its trailing "(#1234)" turned into a pull request link. */
+function UpstreamTitle({ change, repo }: { readonly change: Change; readonly repo: string | null }) {
+  const pr = /^(.*?)\s*\(#(\d+)\)$/.exec(change.title);
+  if (!pr || !repo) return <>{change.title}</>;
+  return (
+    <>
+      {pr[1]} <ExternalLink href={`${repo}/pull/${pr[2]}`}>{`#${pr[2]}`}</ExternalLink>
+    </>
+  );
+}
+
+/** A T3 Blackout title led by its short commit ID, linked to the commit. */
+function BlackoutTitle({ change, repo }: { readonly change: Change; readonly repo: string | null }) {
+  const short = change.sha.slice(0, 7);
+  return (
+    <>
+      {repo ? (
+        <ExternalLink href={`${repo}/commit/${change.sha}`}>{short}</ExternalLink>
+      ) : (
+        <code>{short}</code>
+      )}{" "}
+      {change.title}
+    </>
+  );
+}
+
+function ChangeList({
+  title,
+  changes,
+  empty,
+  render,
+}: {
+  readonly title: string;
+  readonly changes: (typeof T3BLACKOUT_BUILD)["upstream"];
+  readonly empty: string;
+  readonly render: (change: Change, repo: string | null) => ReactNode;
+}) {
+  const { since, items, repo } = changes;
+  return (
+    <section>
+      <h4>
+        {title}
+        {since ? <span> since {since}</span> : items.length > 0 ? <span> · latest</span> : null}
+      </h4>
+      {items.length > 0 ? (
+        <ul>
+          {items.map((change) => (
+            <li key={change.sha}>{render(change, repo)}</li>
+          ))}
+        </ul>
+      ) : (
+        <p>{empty}</p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The full build version (e.g. 0.1.1-nightly.20261017.3238), stamped into the
+ * window's bottom-right corner in the Blackout themes; t3blackout.css hides it
+ * elsewhere. Hovering or focusing it shows what the build changed, baked in at
+ * build time (t3blackoutBuild.ts). The desktop's reported version wins if the
+ * bundle predates a rename.
+ */
+export function BlackoutVersionStamp() {
+  const desktopVersion = useDesktopUpdateState()?.currentVersion;
+  const build = T3BLACKOUT_BUILD;
+  const version = desktopVersion ?? build.version ?? "dev";
+  const built = build.builtAt
+    ? new Date(build.builtAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : null;
+  return (
+    <div aria-label={`T3 Blackout ${version}`} className="t3b-version-stamp" role="note" tabIndex={0}>
+      <i />
+      {version}
+      <div className="t3b-version-notes">
+        <div className="t3b-version-card">
+          <header>
+            <b>{version}</b>
+            <small>
+              {built ? `Built ${built}` : "Development build"}
+              {build.upstreamSha ? ` · upstream ${build.upstreamSha.slice(0, 7)}` : ""}
+            </small>
+          </header>
+          <ChangeList
+            changes={build.upstream}
+            empty="No upstream changes in this build."
+            render={(change, repo) => <UpstreamTitle change={change} repo={repo} />}
+            title="Upstream"
+          />
+          <ChangeList
+            changes={build.blackout}
+            empty="No T3 Blackout changes in this build."
+            render={(change, repo) => <BlackoutTitle change={change} repo={repo} />}
+            title="T3 Blackout"
+          />
+        </div>
       </div>
     </div>
   );

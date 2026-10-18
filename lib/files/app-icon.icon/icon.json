@@ -1,0 +1,123 @@
+{
+  "fill-specializations": [
+    {
+      "value": "system-light"
+    },
+    {
+      "appearance": "dark",
+      "value": "system-dark"
+    },
+    {
+      "appearance": "tinted",
+      "value": "automatic"
+    }
+  ],
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "t3.svg",
+          "name": "T3",
+          "glass": true,
+          "position": {
+            "scale": 8.0,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          },
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.94902,0.41961,0.12157,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
+        },
+        {
+          "image-name": "strike.svg",
+          "name": "Strike",
+          "glass": false,
+          "position": {
+            "scale": 8.0,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          },
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.94902,0.41961,0.12157,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "specular": true
+    },
+    {
+      "layers": [
+        {
+          "image-name": "bars.svg",
+          "name": "Redaction bars",
+          "glass": true,
+          "position": {
+            "scale": 8.0,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          },
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:0.10000,0.10000,0.11000,0.55000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,0.20000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,0.40000"
+              }
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.35
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      },
+      "specular": true
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
