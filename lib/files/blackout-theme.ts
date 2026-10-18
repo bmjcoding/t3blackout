@@ -1,5 +1,5 @@
 // Injected by t3blackout into packages/shared/src/themePalettes.ts, ahead of
-// BUILT_IN_THEMES. Near-black with a trace of warmth and one hot orange, after
+// BUILT_IN_THEMES. Blackout: near-black with a trace of warmth and one hot orange, after
 // the Black Ops II poster. Surfaces stay almost neutral so the orange is only
 // ever on what is live or actionable. The sidebar is Ink's plain black.
 //
@@ -76,3 +76,43 @@ export const BLACKOUT_THEME: ThemeDefinition = {
   sidebarArtwork: true,
 };
 
+// Blackout Smoke: the same palette on smoky charcoal, with the near-black
+// surfaces (cards, composer, selected rows) sitting darker than the canvas.
+export const BLACKOUT_SMOKE_THEME: ThemeDefinition = {
+  id: "blackout-smoke",
+  label: "Blackout Smoke",
+  appearance: "dark",
+  colors: {
+    ...BLACKOUT_THEME.colors,
+    canvas: "#292a2d",
+    chrome: "#292a2d",
+    toolbar: "#292a2d",
+    surface: "#292a2d",
+    terminalBackground: "#292a2d",
+    surfaceRaised: "#141515",
+    surfaceOverlay: "#1b1c1e",
+    codeBackground: "#1a1b1d",
+    muted: "#212224",
+    secondary: "#202123",
+    toolbarControl: "#202123",
+    toolbarControlHover: "#313236",
+    toolbarBorder: "#343538",
+    border: "#3a3b3f",
+    input: "#45464a",
+    textMuted: "#948f8a",
+    mutedForeground: "#948f8a",
+    secondaryLabel: "#948f8a",
+    iconMuted: "#948f8a",
+    placeholder: "#7f7a75",
+    accentForeground: "#111111",
+    messageActionForeground: "#111111",
+    sidebar: "#252528",
+    sidebarMutedForeground: "#948f8a",
+    sidebarControlSurface: "#1e1f21",
+    sidebarRowHover: "#2e2f33",
+    sidebarRowActive: "#1a1b1b",
+    sidebarRowSelected: "#161717",
+    sidebarBorder: "#333437",
+  },
+  sidebarArtwork: true,
+};

@@ -1,5 +1,5 @@
 // Injected by t3blackout into Settings -> Appearance -> Interface. Only shown
-// while the Blackout theme is on screen, since only Blackout draws it.
+// while a Blackout theme is on screen, since only those draw it.
 
 import {
   BLACKOUT_BACKDROP_LABELS,
@@ -15,12 +15,12 @@ import { SettingResetButton, SettingsRow } from "./settingsLayout";
 export function BlackoutBackdropSetting() {
   const themeId = useActiveThemeId();
   const backdrop = useBlackoutBackdrop();
-  if (themeId !== "blackout") return null;
+  if (!themeId?.startsWith("blackout")) return null;
 
   return (
     <SettingsRow
       title="Background"
-      description="The pattern behind the chat in the Blackout theme."
+      description="The pattern behind the chat in the Blackout themes."
       resetAction={
         backdrop !== DEFAULT_BLACKOUT_BACKDROP ? (
           <SettingResetButton

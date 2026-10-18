@@ -19,7 +19,7 @@ Codex's and Claude Code's own sandboxes work normally.
    - the Electron auto-updater (replaced; see Updates)
 
    They also give the app its own name, bundle ID and data directory, plus its look: the
-   T3 BLACKOUT wordmark (an SVG lettered after the Black Ops II logo), the Blackout theme (with a Vignette or Dot glow pattern behind the chat), and
+   T3 BLACKOUT wordmark (an SVG lettered after the Black Ops II logo), the Blackout and Blackout Smoke themes (with a Vignette or Dot glow pattern behind the chat, and a smoked-glass window on macOS), and
    redaction bars in place of upstream's nightly starfield. Each rule states
    how many times its anchor must match; if upstream moves the code, the update
    **aborts** and the installed build stays.

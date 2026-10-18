@@ -13,7 +13,8 @@ const BLACKOUT_PATH =
 
 /**
  * Orange T3, graphite BLACKOUT, both darkening toward the baseline. Fixed
- * colours, so it reads the same on stage art and on every theme.
+ * colours, so it reads the same on stage art and on every theme; Blackout
+ * Smoke lightens the graphite through --t3b-ops-* (t3blackout.css).
  */
 export function BlackoutWordmark() {
   // Rendered twice (the sidebar and its hidden width probe), so gradient ids
@@ -34,9 +35,9 @@ export function BlackoutWordmark() {
           <stop offset="1" stopColor="#a8410f" />
         </linearGradient>
         <linearGradient id={`${id}-ops`} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="#4f535a" />
-          <stop offset="0.5" stopColor="#3b3e43" />
-          <stop offset="1" stopColor="#1f2124" />
+          <stop offset="0" style={{ stopColor: "var(--t3b-ops-1, #4f535a)" }} />
+          <stop offset="0.5" style={{ stopColor: "var(--t3b-ops-2, #3b3e43)" }} />
+          <stop offset="1" style={{ stopColor: "var(--t3b-ops-3, #1f2124)" }} />
         </linearGradient>
       </defs>
       <path
