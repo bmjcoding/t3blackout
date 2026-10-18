@@ -339,19 +339,24 @@ function trackVerb(node: HTMLElement | null) {
 // ------------------------------------------------------------- components --
 
 function WorkingMark({ activity, size }: { activity: Activity | "follow"; size: number }) {
+  const svgRef = useRef<SVGSVGElement>(null);
   const activityRef = useRef(activity);
-  activityRef.current = activity;
-  const attach = (svg: SVGSVGElement | null) => {
-    if (svg === null) return;
+  useEffect(() => {
+    activityRef.current = activity;
+  }, [activity]);
+  // Attach once per mount. The row re-renders on every streamed update, and
+  // re-attaching would replay the intro and drop the current activity.
+  useEffect(() => {
+    const svg = svgRef.current!;
     return trackMark({
       svg,
       shapes: [...svg.querySelectorAll("ellipse")],
       ring: svg.querySelector("circle")!,
       target: () => (activityRef.current === "follow" ? followedActivity() : activityRef.current),
     });
-  };
+  }, []);
   return (
-    <svg ref={attach} viewBox="0 0 48 48" width={size} height={size} aria-hidden className="t3b-mark shrink-0">
+    <svg ref={svgRef} viewBox="0 0 48 48" width={size} height={size} aria-hidden className="t3b-mark shrink-0">
       <circle cx={C} cy={C} r={0} fill="none" stroke="currentColor" strokeWidth={2.6} />
       {Array.from({ length: DOTS }, (_, i) => (
         <ellipse key={i} fill="currentColor" />
