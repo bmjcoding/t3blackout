@@ -179,6 +179,26 @@ any provider's composer: `/explain <topic>` draws the topic as a page in the thr
 - A new skill is a folder with a `SKILL.md` whose frontmatter `name` matches the folder;
   `bin/t3blackout check` rejects one that doesn't.
 
+## Chat mode
+
+The **Chat | Code** switch at the top of the sidebar splits conversations from code work,
+like Claude's desktop app. Chat mode lists your chats (New chat, Artifacts, Pinned,
+Recents); Code mode lists project threads, without the chats.
+
+- A chat is upstream's "No project" thread: it gets its own folder in
+  `~/.t3blackout/scratch`. On creation the app writes an `AGENTS.md` (and a `CLAUDE.md`
+  that imports it) there, telling whichever agent runs it to answer in the thread and save
+  anything worth keeping only as `.md` or `.html` files in that folder.
+- HTML pages render inline, through `html_render`, which also accepts the path of a saved
+  `.html` file. **Open in browser** on a page opens it in the integrated browser
+  (⌘/Ctrl-click: the system browser). Markdown opens in the app's file viewer, rendered.
+- **Artifacts** lists every `.md` and `.html` file your chats have saved.
+- **Transfer to code** (a chat's header, its menu, or right-click in Recents) opens the
+  project picker. Pick a project, or add or create one, and the chat moves there as a normal
+  thread. The agent's session resumes in the project folder with the whole conversation,
+  and the chat-only rules no longer apply. A chat has to be idle to move.
+- The mode follows what's open, and switching back returns to the last chat or thread.
+
 ## Signing and Keychain prompts (macOS)
 
 T3 Blackout keeps its encryption key ("t3blackout Safe Storage") in your Keychain. macOS
