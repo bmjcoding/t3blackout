@@ -1,0 +1,106 @@
+/* Injected by t3blackout and imported after index.css. Deliberately unlayered:
+   unlayered rules beat Tailwind's @layer utilities without !important, which
+   is how the send button and composer overrides below win. */
+
+:root {
+  --t3b-orange: #f26b1f;
+  --t3b-ember: #ff8a3d;
+  --t3b-black: #0a0a0a;
+}
+
+/* ------------------------------------------------------------- wordmark -- */
+
+/* 11px tall at the default 16px interface size; rem so it follows the
+   Settings -> Appearance interface size like the text around it. */
+.t3b-wordmark {
+  display: block;
+  flex-shrink: 0;
+  height: 0.6875rem;
+  width: auto;
+}
+
+/* ---------------------------------------------------- nightly stage art -- */
+
+/* The bars start just past the wordmark: its left offset (set on the sidebar,
+   absent on the sign-in screen) plus its width, 10.445 x its 0.6875rem height,
+   plus a 9px gap. They're a fixed-size 186px tile repeated rightward, so a wider
+   sidebar shows more document instead of stretching the bars, and a narrower one
+   crops it; the last 24px fade so cut bars don't end abruptly. */
+.t3b-redacted {
+  position: relative;
+  background: var(--t3b-black);
+}
+
+.t3b-redacted-bars {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 52px;
+  left: calc(var(--workspace-titlebar-content-left, 20px) + 7.18rem + 9px);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='186' height='52' fill='%23171513'%3E%3Crect x='0' y='8' width='34' height='5' rx='1'/%3E%3Crect x='40' y='8' width='24' height='5' rx='1'/%3E%3Crect x='70' y='8' width='52' height='5' rx='1'/%3E%3Crect x='128' y='8' width='50' height='5' rx='1'/%3E%3Crect x='4' y='17' width='58' height='5' rx='1'/%3E%3Crect x='68' y='17' width='30' height='5' rx='1'/%3E%3Crect x='104' y='17' width='74' height='5' rx='1'/%3E%3Crect x='0' y='26' width='20' height='5' rx='1'/%3E%3Crect x='78' y='26' width='44' height='5' rx='1'/%3E%3Crect x='128' y='26' width='52' height='5' rx='1'/%3E%3Crect x='0' y='35' width='44' height='5' rx='1'/%3E%3Crect x='50' y='35' width='14' height='5' rx='1'/%3E%3Crect x='70' y='35' width='60' height='5' rx='1'/%3E%3Crect x='136' y='35' width='42' height='5' rx='1'/%3E%3Crect x='12' y='44' width='50' height='5' rx='1'/%3E%3Crect x='68' y='44' width='40' height='5' rx='1'/%3E%3Crect x='114' y='44' width='64' height='5' rx='1'/%3E%3C/svg%3E");
+  background-repeat: repeat-x;
+  background-size: 186px 52px;
+  mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+}
+
+.t3b-redacted-strike {
+  position: absolute;
+  left: 26px;
+  top: 27px;
+  width: 44px;
+  height: 2px;
+  background: rgb(242 107 31 / 35%);
+}
+
+/* ---------------------------------------------------------- send button -- */
+
+/* Replaces the starfield-filled button on nightly, and is the Blackout
+   theme's send button on any track. */
+:is(html[data-theme-id="blackout"] [data-t3b-send], [data-t3b-send][data-stage-art="nightly"]) {
+  background: color-mix(in oklab, var(--t3b-ember) 10%, var(--t3b-black));
+  color: var(--t3b-ember);
+  box-shadow:
+    0 0 0 1px rgb(255 138 61 / 55%),
+    0 0 18px rgb(255 120 40 / 35%);
+}
+
+:is(html[data-theme-id="blackout"] [data-t3b-send], [data-t3b-send][data-stage-art="nightly"]):hover:not(:disabled) {
+  box-shadow:
+    0 0 0 1px rgb(255 138 61 / 75%),
+    0 0 24px rgb(255 120 40 / 50%);
+}
+
+:is(html[data-theme-id="blackout"] [data-t3b-send], [data-t3b-send][data-stage-art="nightly"]):disabled {
+  box-shadow: 0 0 0 1px rgb(255 138 61 / 25%);
+}
+
+/* ------------------------------------------------------------- composer -- */
+
+/* Only while the chat box has focus: warm its outline and top highlight (both
+   variables upstream sets per theme) and add Low Light's glow, wherever the send
+   button above is ringed. The composer can't see the stage itself, hence :has(). */
+:is(
+  html[data-theme-id="blackout"] [data-slot="composer-shell"],
+  [data-slot="composer-shell"]:has([data-t3b-send][data-stage-art="nightly"])
+):focus-within {
+  --chat-composer-outline: color-mix(in oklab, var(--t3b-ember) 22%, var(--t3b-black));
+  --chat-composer-highlight: rgb(255 138 61 / 25%);
+}
+
+:is(
+  html[data-theme-id="blackout"] [data-slot="composer-shell"],
+  [data-slot="composer-shell"]:has([data-t3b-send][data-stage-art="nightly"])
+) [data-slot="composer-host"] {
+  transition: box-shadow 200ms ease-out;
+}
+
+:is(
+  html[data-theme-id="blackout"] [data-slot="composer-shell"],
+  [data-slot="composer-shell"]:has([data-t3b-send][data-stage-art="nightly"])
+):focus-within [data-slot="composer-host"] {
+  box-shadow:
+    0 0 0 1px rgb(255 138 61 / 8%),
+    0 0 32px -6px rgb(255 120 40 / 30%),
+    0 20px 60px rgb(0 0 0 / 50%);
+}

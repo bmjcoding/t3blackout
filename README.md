@@ -18,7 +18,9 @@ Codex's and Claude Code's own sandboxes work normally.
    - npm version polling and Google favicon lookups
    - the Electron auto-updater (replaced; see Updates)
 
-   They also give the app its own name, bundle ID and data directory. Each rule states
+   They also give the app its own name, bundle ID and data directory, plus its look: the
+   T3 BLACKOUT wordmark (an SVG lettered after the Black Ops II logo), the Blackout theme, and
+   redaction bars in place of upstream's nightly starfield. Each rule states
    how many times its anchor must match; if upstream moves the code, the update
    **aborts** and the installed build stays.
 2. **Boot environment** (`lib/files/boot-env.ts`). This runs first in the app.
