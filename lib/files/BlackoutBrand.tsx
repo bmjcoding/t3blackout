@@ -16,9 +16,9 @@ const BLACKOUT_PATH =
   "M214.56 0H279.32A24 24 0 0 1 303.32 24V29.5A24 24 0 0 1 279.32 53.5H287.32A24 24 0 0 1 311.32 77.5V76A24 24 0 0 1 287.32 100H214.56ZM238.56 19H269.32A10 10 0 0 1 279.32 29V28.5A10 10 0 0 1 269.32 38.5H238.56V19ZM238.56 57.5H277.32A10 10 0 0 1 287.32 67.5V71A10 10 0 0 1 277.32 81H238.56V57.5ZM326.08 0L350.08 0L350.08 81L401.52 81L401.52 100L326.08 100ZM416.28 100L459.12 0L475.12 0L517.96 100L484.96 100L467.12 58.36L449.28 100ZM624.56 0H562.72A30 30 0 0 0 532.72 30V70A30 30 0 0 0 562.72 100H624.56V81H566.72A10 10 0 0 1 556.72 71V29A10 10 0 0 1 566.72 19H624.56ZM639.32 0L663.32 0L663.32 100L639.32 100ZM670.32 39L703.08 0L736.08 0L694.08 50L736.08 100L703.08 100L670.32 61ZM780.84 0H819.24A30 30 0 0 1 849.24 30V70A30 30 0 0 1 819.24 100H780.84A30 30 0 0 1 750.84 70V30A30 30 0 0 1 780.84 0ZM784.84 19H815.24A10 10 0 0 1 825.24 29V71A10 10 0 0 1 815.24 81H784.84A10 10 0 0 1 774.84 71V29A10 10 0 0 1 784.84 19ZM864 0H888V71A10 10 0 0 0 898 81H925.12A10 10 0 0 0 935.12 71V0H959.12V70A30 30 0 0 1 929.12 100H894A30 30 0 0 1 864 70ZM973.88 0L1062.44 0L1062.44 19L1030.16 19L1030.16 100L1006.16 100L1006.16 19L973.88 19Z";
 
 /**
- * Orange T3, graphite BLACKOUT, both darkening toward the baseline. Fixed
- * colours, so it reads the same on stage art and on every theme; Blackout
- * Smoke lightens the graphite through --t3b-ops-* (t3blackout.css).
+ * T3 in the theme's accent, graphite BLACKOUT, both darkening toward the
+ * baseline. The colours come from t3blackout.css: --t3b-ember/accent/deep for
+ * T3, and --t3b-ops-*, which Blackout Smoke lightens, for BLACKOUT.
  */
 export function BlackoutWordmark() {
   // Rendered twice (the sidebar and its hidden width probe), so gradient ids
@@ -34,9 +34,9 @@ export function BlackoutWordmark() {
     >
       <defs>
         <linearGradient id={`${id}-t3`} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="#ff8a3d" />
-          <stop offset="0.5" stopColor="#f26b1f" />
-          <stop offset="1" stopColor="#a8410f" />
+          <stop offset="0" style={{ stopColor: "var(--t3b-ember, #ff8a3d)" }} />
+          <stop offset="0.5" style={{ stopColor: "var(--t3b-accent, #f26b1f)" }} />
+          <stop offset="1" style={{ stopColor: "var(--t3b-deep, #a8410f)" }} />
         </linearGradient>
         <linearGradient id={`${id}-ops`} x1="0" x2="0" y1="0" y2="1">
           <stop offset="0" style={{ stopColor: "var(--t3b-ops-1, #4f535a)" }} />
@@ -56,7 +56,7 @@ export function BlackoutWordmark() {
 
 /**
  * Replaces upstream's starfield: blacked-out document bars trailing off the
- * wordmark, one struck in orange. Static: no animation, nothing repaints.
+ * wordmark, one struck in the accent. Static: no animation, nothing repaints.
  */
 export function BlackoutRedactedArt() {
   return (
