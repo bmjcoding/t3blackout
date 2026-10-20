@@ -3,7 +3,7 @@
 ## Spinner verbs
 
 While an agent works, the working indicator shows a random verb that changes
-every few seconds ("Percolating…", "Spelunking…"). The list lives in
+every few seconds ("Rizzing…", "Aurafarming…"). The list lives in
 [`lib/files/ClaudeSpinner.verbs.txt`](lib/files/ClaudeSpinner.verbs.txt) and
 new ones are welcome.
 
@@ -11,9 +11,9 @@ new ones are welcome.
   (no spaces or hyphens).
 - Keep the file in alphabetical order. This keeps diffs small and pull
   requests from clashing.
-- Fun beats accurate, but steer clear of anything that sounds alarming
-  mid-task ("Deleting…", "Deploying…") or that you wouldn't want on a
-  colleague's screen.
+- The theme is Gen Z and millennial slang. Fun beats accurate, but steer
+  clear of anything that sounds alarming mid-task ("Deleting…",
+  "Deploying…") or that you wouldn't want on a colleague's screen.
 
 Check your change before opening a pull request:
 
