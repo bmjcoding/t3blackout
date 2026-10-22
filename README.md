@@ -23,6 +23,11 @@ Codex's and Claude Code's own sandboxes work normally.
    redaction bars in place of upstream's nightly starfield. Each rule states
    how many times its anchor must match; if upstream moves the code, the update
    **aborts** and the installed build stays.
+
+   Before the rules run, every hostname that upstream's app source writes as a URL is
+   checked against `lib/known-hosts.txt`. An unlisted host also aborts the update: it
+   may be a new phone-home that no rule targets and that the smoke test never triggers.
+   Look at what talks to it, then add a rule or list the host with a note.
 2. **Boot environment** (`lib/files/boot-env.ts`). This runs first in the app.
    - It switches T3's telemetry off a second time.
    - It switches off the agent CLIs' own analytics and crash reporting where a switch

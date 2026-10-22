@@ -47,6 +47,23 @@ let channel = "latest";
 let allowDowngrade = false;
 let announced: AvailableUpdate | null = null;
 
+// Upstream's messages are fixed ("Electron updater failed to download the
+// update…") and the UI shows only the message, so a failed build would never
+// say why. These keep upstream's tags and show the CLI's reason instead.
+const reasonOf = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause));
+
+class CheckFailed extends ElectronUpdater.ElectronUpdaterCheckForUpdatesError {
+  override get message(): string {
+    return `Could not check for updates: ${reasonOf(this.cause)}`;
+  }
+}
+
+class BuildFailed extends ElectronUpdater.ElectronUpdaterDownloadUpdateError {
+  override get message(): string {
+    return reasonOf(this.cause);
+  }
+}
+
 function cliEnv(): NodeJS.ProcessEnv {
   // ELECTRON_RUN_AS_NODE and the app's own T3CODE_* settings must not reach
   // the build or the relaunched app.
@@ -114,7 +131,7 @@ const check = (offline: boolean) =>
         emitter.emit("update-available", { version, releaseNotes });
         if (result.update.staged) emitter.emit("update-downloaded", { version });
       },
-      catch: (cause) => new ElectronUpdater.ElectronUpdaterCheckForUpdatesError({ channel: checkChannel, cause }),
+      catch: (cause) => new CheckFailed({ channel: checkChannel, cause }),
     });
   });
 
@@ -150,7 +167,7 @@ export const make = ElectronUpdater.ElectronUpdater.of({
         });
         emitter.emit("update-downloaded", { version: target.version });
       },
-      catch: (cause) => new ElectronUpdater.ElectronUpdaterDownloadUpdateError({ channel: downloadChannel, cause }),
+      catch: (cause) => new BuildFailed({ channel: downloadChannel, cause }),
     });
   }),
   quitAndInstall: ({ isSilent, isForceRunAfter }) =>
