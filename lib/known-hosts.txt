@@ -1,7 +1,7 @@
 # Hostnames upstream's app source reaches for, as URLs. Every update scans the
 # upstream checkout (before stripping) and fails if it finds a host not listed
 # here: a new host can be a new phone-home that no strip rule or smoke test
-# would notice. Tests, fixtures, docs and build scripts aren't scanned.
+# would notice. Tests, fixtures and docs aren't scanned.
 #
 # Being listed means looked at, not allowed. For a new host, find what talks
 # to it (the failure names the file and line), then either add a strip rule
@@ -15,10 +15,12 @@ agentclientprotocol.com
 api.anthropic.com
 api.bitbucket.org
 api.example.com
+api.expo.dev # EAS device hosts (upstream #21843); only with your own Expo token or eas login
 api.github.com # LiteLLM pricing fallback is disabled by server/litellm-rates-off; also source control
 api.meta.ai
 api.openai.com
 api2.cursor.sh
+app.example.com
 app.invalid
 app.t3.codes
 apps.apple.com
@@ -55,6 +57,7 @@ ingest.t3.codes # telemetry since upstream 28c32d20c3; server/analytics-defaults
 json-schema.org
 kagi.com
 latest.app.t3.codes
+login.tailscale.com # link in an error message (apps/server/src/cli/pair.ts)
 media.invalid
 nightly.app.t3.codes
 oauth2.googleapis.com
@@ -78,6 +81,7 @@ ui.shadcn.com
 us.i.posthog.com # telemetry before upstream 28c32d20c3; server/analytics-defaults empties it
 www.apple.com
 www.bing.com
+www.ecma-international.org # spec link in a generated schema comment
 www.ecosia.org
 www.google.com
 www.googleapis.com
