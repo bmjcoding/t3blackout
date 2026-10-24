@@ -1,22 +1,29 @@
 // @effect-diagnostics nodeBuiltinImport:off - Placement builds folders and symlinks with node:fs's own calls.
-// Injected by t3blackout. Ships the skills in the repo's skills/ folder to every
-// agent harness that's installed, and lets Settings -> Skills turn each one off.
+// Injected by t3blackout. Puts every skill on this machine in front of every
+// installed agent harness, and lets Settings -> Skills turn each one off,
+// everywhere or for one harness.
 //
-// Each skill is written once to <T3 home>/skills/<name> on launch, from the
-// copy baked into this build (blackoutSkills.generated.ts). Every installed
-// harness gets a symlink to it in the folder it reads skills from. The CLIs and
-// T3's own skill scanners follow the link; verified for Claude Code and Codex.
+// Two libraries feed the harnesses: <T3 home>/skills holds the skills in the
+// repo's skills/ folder, rewritten on launch from the copy baked into this
+// build (blackoutSkills.generated.ts); <T3 home>/my-skills holds the person's
+// own. A skill found in any harness's skills folder is moved into my-skills
+// (adopted) and replaced by a link, so it reaches the other harnesses too.
+// Same-named copies elsewhere are moved to <T3 home>/skills-replaced rather
+// than deleted. Every installed harness gets a symlink per enabled skill in the
+// folder it reads skills from; the CLIs and T3's own skill scanners follow the
+// link (verified for Claude Code and Codex).
 //
-// A link that resolves into <T3 home>/skills is ours: we add, replace and remove
-// only those. A folder, file or foreign link of the same name is the person's
-// own skill and is never touched; the setting reports it as skipped. A harness
-// counts as installed when its home folder exists; we create only the skills/
-// folder inside it, so nothing appears for harnesses that aren't there.
+// A link that resolves into one of the two libraries is ours: we add, replace
+// and remove only those. A skill of the person's own named like a shipped one
+// stays where it is and takes that harness's spot; Settings shows the shipped
+// one as blocked there. A harness counts as installed when its home folder
+// exists; we create only the skills/ folder inside it.
 
-import * as NodeFS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -26,125 +33,135 @@ import {
   BLACKOUT_SKILLS_GET_STATE_CHANNEL,
   BLACKOUT_SKILLS_SET_ENABLED_CHANNEL,
 } from "../channels.ts";
+import {
+  applyChange,
+  PlacementChange,
+  PlacementItem,
+  readPlacementPrefs,
+  writeJsonAtomic,
+} from "./blackoutPlacement.ts";
 
 interface Harness {
+  /** Stable; saved in the preferences. */
+  readonly id: string;
   readonly label: string;
   readonly skillsDir: string;
   /** Linked when any of these exists. */
   readonly homes: ReadonlyArray<string>;
 }
 
-function harnesses(): ReadonlyArray<Harness> {
-  const home = NodeOS.homedir();
-  const claude = process.env.CLAUDE_CONFIG_DIR?.trim() || NodePath.join(home, ".claude");
-  const codex = process.env.CODEX_HOME?.trim() || NodePath.join(home, ".codex");
-  const config = process.env.XDG_CONFIG_HOME?.trim() || NodePath.join(home, ".config");
-  const own = (label: string, dir: string) => ({
-    label,
-    skillsDir: NodePath.join(home, dir, "skills"),
-    homes: [NodePath.join(home, dir)],
-  });
+interface Member {
+  readonly label: string;
+  readonly home: string;
+}
+
+const home = () => NodeOS.homedir();
+const claudeHome = () => process.env.CLAUDE_CONFIG_DIR?.trim() || NodePath.join(home(), ".claude");
+const codexHome = () => process.env.CODEX_HOME?.trim() || NodePath.join(home(), ".codex");
+const configHome = () => process.env.XDG_CONFIG_HOME?.trim() || NodePath.join(home(), ".config");
+const piHome = () => process.env.PI_CODING_AGENT_DIR?.trim() || NodePath.join(home(), ".pi", "agent");
+
+/** Agents that read the shared ~/.agents/skills folder, and their own folder for skills (adopted from). */
+function sharedMembers(): ReadonlyArray<Member & { readonly ownSkills: string }> {
+  const at = (label: string, dir: string) => ({ label, home: dir, ownSkills: NodePath.join(dir, "skills") });
   return [
-    { label: "Claude", skillsDir: NodePath.join(claude, "skills"), homes: [claude] },
-    {
-      // The cross-harness folder. Cursor also reads ~/.claude/skills and keeps
-      // the first of a name it finds.
-      label: "Codex & other agents",
-      skillsDir: NodePath.join(home, ".agents", "skills"),
-      homes: [
-        NodePath.join(home, ".agents"),
-        codex,
-        NodePath.join(home, ".cursor"),
-        NodePath.join(config, "opencode"),
-        NodePath.join(config, "muse"),
-        NodePath.join(home, ".copilot"),
-        NodePath.join(config, "devin"),
-        NodePath.join(config, "goose"),
-        NodePath.join(home, ".augment"),
-        NodePath.join(home, ".gemini"),
-      ],
-    },
-    {
-      label: "Antigravity",
-      skillsDir: NodePath.join(home, ".gemini", "config", "skills"),
-      homes: [NodePath.join(home, ".gemini")],
-    },
-    own("Grok", ".grok"),
-    // Neither documents ~/.agents/skills.
-    own("Qwen Code", ".qwen"),
-    own("Junie", ".junie"),
+    at("Codex", codexHome()),
+    at("Cursor", NodePath.join(home(), ".cursor")),
+    at("OpenCode", NodePath.join(configHome(), "opencode")),
+    at("Pi", piHome()),
+    at("Copilot", NodePath.join(home(), ".copilot")),
+    at("Gemini CLI", NodePath.join(home(), ".gemini")),
+    at("Goose", NodePath.join(configHome(), "goose")),
+    at("Augment", NodePath.join(home(), ".augment")),
+    at("Devin", NodePath.join(configHome(), "devin")),
   ];
 }
 
-const t3Home = () => process.env.T3CODE_HOME?.trim() || NodePath.join(NodeOS.homedir(), ".t3blackout");
-const storeDir = () => NodePath.join(t3Home(), "skills");
-const prefsFile = () => NodePath.join(t3Home(), "blackout-skills.json");
-const shipped = new Set(BLACKOUT_SKILLS.map((skill) => skill.name));
-
-const SkillState = Schema.Struct({
-  name: Schema.String,
-  description: Schema.String,
-  enabled: Schema.Boolean,
-  /** Harnesses it's linked into. */
-  placed: Schema.Array(Schema.String),
-  /** Harnesses where a skill of the same name that isn't ours holds the spot. */
-  skipped: Schema.Array(Schema.String),
-});
-const SkillsState = Schema.Array(SkillState);
-type SkillsState = typeof SkillsState.Type;
-
 const exists = (path: string) =>
-  NodeFS.stat(path).then(
+  NodeFSP.stat(path).then(
     () => true,
     () => false,
   );
 
-async function readDisabled(): Promise<Set<string>> {
-  try {
-    const parsed: unknown = JSON.parse(await NodeFS.readFile(prefsFile(), "utf8"));
-    const disabled = (parsed as { disabled?: unknown }).disabled;
-    return new Set(Array.isArray(disabled) ? disabled.filter((name) => typeof name === "string") : []);
-  } catch {
-    return new Set();
-  }
+async function installedMembers(): Promise<ReadonlyArray<string>> {
+  const members = sharedMembers();
+  const present = await Promise.all(members.map((member) => exists(member.home)));
+  return members.filter((_, index) => present[index]).map((member) => member.label);
 }
 
-async function writeDisabled(disabled: ReadonlySet<string>): Promise<void> {
-  const file = prefsFile();
-  await NodeFS.mkdir(NodePath.dirname(file), { recursive: true });
-  const temporary = `${file}.${process.pid}.tmp`;
-  await NodeFS.writeFile(temporary, JSON.stringify({ disabled: [...disabled].sort() }, null, 2) + "\n");
-  await NodeFS.rename(temporary, file);
+function harnesses(shared: ReadonlyArray<string>): ReadonlyArray<Harness> {
+  const own = (id: string, label: string, dir: string) => ({
+    id,
+    label,
+    skillsDir: NodePath.join(home(), dir, "skills"),
+    homes: [NodePath.join(home(), dir)],
+  });
+  return [
+    { id: "claude", label: "Claude", skillsDir: NodePath.join(claudeHome(), "skills"), homes: [claudeHome()] },
+    {
+      // The cross-harness folder. Cursor and OpenCode also read
+      // ~/.claude/skills and keep the first of a name.
+      id: "agents",
+      label: shared.length > 0 ? shared.join(", ") : "Other agents",
+      skillsDir: NodePath.join(home(), ".agents", "skills"),
+      homes: sharedMembers().map((member) => member.home),
+    },
+    {
+      id: "antigravity",
+      label: "Antigravity",
+      skillsDir: NodePath.join(home(), ".gemini", "config", "skills"),
+      homes: [NodePath.join(home(), ".gemini", "config"), NodePath.join(home(), ".gemini", "antigravity-cli")],
+    },
+    own("grok", "Grok", ".grok"),
+    // Neither documents ~/.agents/skills.
+    own("qwen", "Qwen Code", ".qwen"),
+    own("junie", "Junie", ".junie"),
+  ];
 }
+
+const t3Home = () => process.env.T3CODE_HOME?.trim() || NodePath.join(home(), ".t3blackout");
+const storeDir = () => NodePath.join(t3Home(), "skills");
+const mineDir = () => NodePath.join(t3Home(), "my-skills");
+const replacedDir = () => NodePath.join(t3Home(), "skills-replaced");
+const prefsFile = () => NodePath.join(t3Home(), "blackout-skills.json");
+const shipped = new Set(BLACKOUT_SKILLS.map((skill) => skill.name));
+
+const SkillsState = Schema.Struct({
+  shipped: Schema.Array(PlacementItem),
+  onMachine: Schema.Array(PlacementItem),
+});
+type SkillsState = typeof SkillsState.Type;
 
 /** Rewrites the store from this build; each skill swaps in whole, so links never see half of one. */
 async function writeStore(): Promise<void> {
   const store = storeDir();
-  await NodeFS.mkdir(store, { recursive: true });
+  await NodeFSP.mkdir(store, { recursive: true });
   for (const skill of BLACKOUT_SKILLS) {
     const staging = NodePath.join(store, `.staging-${skill.name}`);
-    await NodeFS.rm(staging, { recursive: true, force: true });
+    await NodeFSP.rm(staging, { recursive: true, force: true });
     for (const file of skill.files) {
       const full = NodePath.join(staging, file.path);
-      await NodeFS.mkdir(NodePath.dirname(full), { recursive: true });
-      await NodeFS.writeFile(full, Buffer.from(file.base64, "base64"), {
+      await NodeFSP.mkdir(NodePath.dirname(full), { recursive: true });
+      await NodeFSP.writeFile(full, Buffer.from(file.base64, "base64"), {
         mode: file.executable ? 0o755 : 0o644,
       });
     }
     const final = NodePath.join(store, skill.name);
-    await NodeFS.rm(final, { recursive: true, force: true });
-    await NodeFS.rename(staging, final);
+    await NodeFSP.rm(final, { recursive: true, force: true });
+    await NodeFSP.rename(staging, final);
   }
-  for (const entry of await NodeFS.readdir(store)) {
-    if (!shipped.has(entry)) await NodeFS.rm(NodePath.join(store, entry), { recursive: true, force: true });
+  for (const entry of await NodeFSP.readdir(store)) {
+    if (!shipped.has(entry)) await NodeFSP.rm(NodePath.join(store, entry), { recursive: true, force: true });
   }
 }
 
+const libraryOf = (name: string) => NodePath.join(shipped.has(name) ? storeDir() : mineDir(), name);
+
 async function isOurLink(path: string): Promise<boolean> {
   try {
-    if (!(await NodeFS.lstat(path)).isSymbolicLink()) return false;
-    const target = NodePath.resolve(NodePath.dirname(path), await NodeFS.readlink(path));
-    return target.startsWith(storeDir() + NodePath.sep);
+    if (!(await NodeFSP.lstat(path)).isSymbolicLink()) return false;
+    const target = NodePath.resolve(NodePath.dirname(path), await NodeFSP.readlink(path));
+    return target.startsWith(storeDir() + NodePath.sep) || target.startsWith(mineDir() + NodePath.sep);
   } catch {
     return false;
   }
@@ -153,54 +170,164 @@ async function isOurLink(path: string): Promise<boolean> {
 /** False when the spot holds the person's own skill. */
 async function ensureLink(skillsDir: string, name: string): Promise<boolean> {
   const path = NodePath.join(skillsDir, name);
-  const target = NodePath.join(storeDir(), name);
-  const present = await NodeFS.lstat(path).then(
+  const target = libraryOf(name);
+  const present = await NodeFSP.lstat(path).then(
     () => true,
     () => false,
   );
   if (present) {
     if (!(await isOurLink(path))) return false;
-    if ((await NodeFS.readlink(path)) === target) return true;
-    await NodeFS.unlink(path);
+    if ((await NodeFSP.readlink(path)) === target) return true;
+    await NodeFSP.unlink(path);
   }
-  await NodeFS.mkdir(skillsDir, { recursive: true });
-  await NodeFS.symlink(target, path, "dir");
+  await NodeFSP.mkdir(skillsDir, { recursive: true });
+  await NodeFSP.symlink(target, path, "dir");
   return true;
 }
 
-/** Brings every harness folder in line with what's shipped and enabled, and reports it. */
-async function reconcile(): Promise<SkillsState> {
-  const disabled = await readDisabled();
-  const placed = new Map(BLACKOUT_SKILLS.map((skill) => [skill.name, [] as string[]]));
-  const skipped = new Map(BLACKOUT_SKILLS.map((skill) => [skill.name, [] as string[]]));
+/**
+ * A frontmatter value as a line of text: plain, quoted, or a folded/literal
+ * block. Enough for a description in Settings; the harnesses parse it fully.
+ */
+function frontmatterField(contents: string, key: string): string {
+  const lines = contents.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1]?.split(/\r?\n/) ?? [];
+  const at = lines.findIndex((line) => line.startsWith(`${key}:`));
+  if (at < 0) return "";
+  let value = lines[at]!.slice(key.length + 1).trim();
+  if (value === "" || /^[>|][+-]?$/.test(value)) {
+    const block: string[] = [];
+    for (const line of lines.slice(at + 1)) {
+      if (line.trim() !== "" && !/^\s/.test(line)) break;
+      block.push(line.trim());
+    }
+    value = block.filter(Boolean).join(" ");
+  }
+  const quoted = /^(["'])([\s\S]*)\1$/.exec(value);
+  return quoted ? quoted[2]! : value;
+}
 
-  for (const harness of harnesses()) {
+const stamp = () => Effect.runSync(DateTime.now.pipe(Effect.map(DateTime.formatIso))).replace(/[:.]/g, "-");
+
+/** Moves a path aside instead of deleting it. */
+async function setAside(path: string, from: string, name: string): Promise<void> {
+  const dir = NodePath.join(replacedDir(), from);
+  await NodeFSP.mkdir(dir, { recursive: true });
+  await NodeFSP.rename(path, NodePath.join(dir, `${name}-${stamp()}`));
+}
+
+/**
+ * Moves every skill of the person's own found in a skills folder into
+ * my-skills and leaves nothing of it behind there, so placement can link it
+ * everywhere. A skill already in my-skills is replaced by a newer copy found
+ * in a folder (an installer updating it); the old one is set aside.
+ */
+async function adopt(folders: ReadonlyArray<{ id: string; dir: string }>): Promise<void> {
+  interface Found {
+    readonly folder: string;
+    readonly path: string;
+    readonly real: string;
+    readonly isLink: boolean;
+  }
+  const byName = new Map<string, Found[]>();
+  for (const folder of folders) {
+    const entries = await NodeFSP.readdir(folder.dir).catch((): string[] => []);
+    for (const entry of entries.sort()) {
+      if (entry.startsWith(".") || shipped.has(entry)) continue;
+      const path = NodePath.join(folder.dir, entry);
+      if (await isOurLink(path)) continue;
+      if (!(await exists(NodePath.join(path, "SKILL.md")))) continue;
+      const real = await NodeFSP.realpath(path).catch(() => null);
+      if (real === null || real.startsWith(mineDir() + NodePath.sep)) continue;
+      const isLink = (await NodeFSP.lstat(path)).isSymbolicLink();
+      byName.set(entry, [...(byName.get(entry) ?? []), { folder: folder.id, path, real, isLink }]);
+    }
+  }
+  if (byName.size === 0) return;
+  await NodeFSP.mkdir(mineDir(), { recursive: true });
+  const insideFolders = (real: string) => folders.some((folder) => real.startsWith(folder.dir + NodePath.sep));
+
+  for (const [name, found] of byName) {
+    const library = NodePath.join(mineDir(), name);
+    if (await NodeFSP.lstat(library).then(() => true, () => false)) await setAside(library, "my-skills", name);
+    // A real folder wins over a link to one; links resolve before anything moves.
+    const source = found.find((entry) => !entry.isLink) ?? found[0]!;
+    if (insideFolders(source.real) || !source.isLink) {
+      await NodeFSP.rename(source.real, library);
+    } else {
+      // A link to a folder outside the harnesses (a git checkout, say): keep pointing there.
+      await NodeFSP.symlink(source.real, library, "dir");
+    }
+    for (const entry of found) {
+      const still = await NodeFSP.lstat(entry.path).then(() => true, () => false);
+      if (!still) continue;
+      if (entry.isLink && (entry.real === source.real || !(await exists(entry.path)))) await NodeFSP.unlink(entry.path);
+      else await setAside(entry.path, entry.folder, name);
+    }
+  }
+}
+
+async function describe(dir: string): Promise<string> {
+  const contents = await NodeFSP.readFile(NodePath.join(dir, "SKILL.md"), "utf8").catch(() => "");
+  return frontmatterField(contents, "description");
+}
+
+/** Brings every harness folder in line with the libraries and the switches, and reports it. */
+async function reconcile(): Promise<SkillsState> {
+  const shared = await installedMembers();
+  const all = harnesses(shared);
+  await adopt([
+    ...all.map((harness) => ({ id: harness.id, dir: harness.skillsDir })),
+    ...sharedMembers().map((member) => ({ id: member.label.toLowerCase().replace(/\W+/g, "-"), dir: member.ownSkills })),
+  ]);
+
+  const prefs = await readPlacementPrefs(prefsFile());
+  const mine = (await NodeFSP.readdir(mineDir()).catch((): string[] => []))
+    .filter((name) => !name.startsWith(".") && !shipped.has(name))
+    .sort();
+  const names = new Set([...shipped, ...mine]);
+  const installed: Harness[] = [];
+  const blocked = new Map<string, Set<string>>();
+
+  for (const harness of all) {
     try {
-      const installed = (await Promise.all(harness.homes.map(exists))).some(Boolean);
-      const entries = await NodeFS.readdir(harness.skillsDir).catch((): string[] => []);
+      const present = (await Promise.all(harness.homes.map(exists))).some(Boolean);
+      const wanted = (name: string) =>
+        present && names.has(name) && !prefs.disabled.has(name) && !prefs.excluded.get(name)?.has(harness.id);
+      const entries = await NodeFSP.readdir(harness.skillsDir).catch((): string[] => []);
       for (const entry of entries) {
-        const wanted = installed && shipped.has(entry) && !disabled.has(entry);
         const path = NodePath.join(harness.skillsDir, entry);
-        if (!wanted && (await isOurLink(path))) await NodeFS.unlink(path);
+        if (!wanted(entry) && (await isOurLink(path))) await NodeFSP.unlink(path);
       }
-      if (!installed) continue;
-      for (const skill of BLACKOUT_SKILLS) {
-        if (disabled.has(skill.name)) continue;
-        const linked = await ensureLink(harness.skillsDir, skill.name);
-        (linked ? placed : skipped).get(skill.name)?.push(harness.label);
+      if (!present) continue;
+      installed.push(harness);
+      for (const name of names) {
+        if (!wanted(name)) continue;
+        if (!(await ensureLink(harness.skillsDir, name))) {
+          blocked.set(name, (blocked.get(name) ?? new Set()).add(harness.id));
+        }
       }
     } catch (error) {
       Effect.runSync(Effect.logWarning(`Could not place skills for ${harness.label}`, error));
     }
   }
 
-  return BLACKOUT_SKILLS.map((skill) => ({
-    name: skill.name,
-    description: skill.description,
-    enabled: !disabled.has(skill.name),
-    placed: placed.get(skill.name) ?? [],
-    skipped: skipped.get(skill.name) ?? [],
-  }));
+  const item = (name: string, description: string) => ({
+    name,
+    description,
+    enabled: !prefs.disabled.has(name),
+    agents: installed.map((harness) => ({
+      id: harness.id,
+      label: harness.label,
+      detail: harness.skillsDir.replace(home(), "~"),
+      on: !prefs.excluded.get(name)?.has(harness.id),
+      ...(blocked.get(name)?.has(harness.id) ? { blocked: `Your own /${name} is used here` } : {}),
+    })),
+  });
+
+  return {
+    shipped: BLACKOUT_SKILLS.map((skill) => item(skill.name, skill.description)),
+    onMachine: await Promise.all(mine.map(async (name) => item(name, await describe(NodePath.join(mineDir(), name))))),
+  };
 }
 
 // Launch, toggles and Settings reads all touch the same folders; one at a time.
@@ -215,7 +342,7 @@ export class BlackoutSkillsError extends Data.TaggedError("BlackoutSkillsError")
   readonly cause: unknown;
 }> {
   override get message() {
-    return `Could not update Blackout skills: ${String(this.cause)}`;
+    return `Could not update skills: ${String(this.cause)}`;
   }
 }
 
@@ -240,7 +367,7 @@ export const installBlackoutSkills = Effect.fn("desktop.ipc.installBlackoutSkill
       channel: BLACKOUT_SKILLS_GET_STATE_CHANNEL,
       payload: Schema.Void,
       result: SkillsState,
-      // Reconciling on read also links a harness installed since launch.
+      // Reconciling on read also links a harness installed, or a skill added, since launch.
       handler: () => run(reconcile),
     }),
   );
@@ -248,14 +375,12 @@ export const installBlackoutSkills = Effect.fn("desktop.ipc.installBlackoutSkill
   yield* ipc.handle(
     DesktopIpc.makeIpcMethod({
       channel: BLACKOUT_SKILLS_SET_ENABLED_CHANNEL,
-      payload: Schema.Struct({ name: Schema.String, enabled: Schema.Boolean }),
+      payload: PlacementChange,
       result: SkillsState,
-      handler: ({ name, enabled }) =>
+      handler: (change) =>
         run(async () => {
-          const disabled = await readDisabled();
-          if (enabled) disabled.delete(name);
-          else if (shipped.has(name)) disabled.add(name);
-          await writeDisabled(disabled);
+          const prefs = await readPlacementPrefs(prefsFile());
+          await writeJsonAtomic(prefsFile(), applyChange(prefs, change));
           return reconcile();
         }),
     }),

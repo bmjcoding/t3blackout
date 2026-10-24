@@ -194,29 +194,45 @@ It also has its own:
 
 So both apps can be installed side by side.
 
-## Skills
+## Skills and MCP servers
+
+Every skill and user-level MCP server on the machine reaches every agent harness you
+have installed. **Settings → Skills** and **Settings → MCP Servers** have one switch per
+item for all agents; open its agent list to switch it off for single agents. Off for an
+agent is remembered as an exclusion, so an agent you install later gets everything
+that's on.
 
 Every folder in [`skills/`](skills) ships with the app as an agent skill, invoked from
 any provider's composer: `/explain <topic>` draws the topic as a page in the thread.
 
-- On launch the app writes each skill to `~/.t3blackout/skills/<name>` and symlinks it into
-  the skills folder of every agent harness you have installed: `~/.claude/skills` (Claude,
-  Cursor), `~/.agents/skills` (Codex, Cursor, OpenCode, Muse, Copilot, Devin, goose, Auggie,
-  Gemini CLI), `~/.gemini/config/skills` (Antigravity), `~/.grok/skills`, `~/.qwen/skills`
-  and `~/.junie/skills`. A harness counts as installed when its home
-  folder exists; one installed later is linked on the next launch or when you open
-  **Settings → Skills**.
-- It only ever adds or removes its own links. A skill of yours with the same name is
-  left alone, and Settings shows it as skipped.
-- **Settings → Skills** has a switch per skill. Off removes its links.
+- **Skills.** On launch the app writes the shipped skills to `~/.t3blackout/skills` and
+  moves skills of your own it finds in any agent's skills folder into
+  `~/.t3blackout/my-skills`. Same-named copies elsewhere go to
+  `~/.t3blackout/skills-replaced` rather than being deleted. Each enabled skill is then
+  symlinked into the folder every installed harness reads: `~/.claude/skills` (Claude),
+  `~/.agents/skills` (Codex, Cursor, OpenCode, Pi, Copilot, Gemini CLI and most newer
+  agents, one switch since they share the folder), `~/.gemini/config/skills`
+  (Antigravity), `~/.grok/skills`, `~/.qwen/skills` and `~/.junie/skills`. A harness counts
+  as installed when its home folder exists. A skill of yours named like a shipped one
+  stays where it is and wins in that harness.
+- **MCP servers.** The app reads the user-level servers in each installed agent's own
+  config (`~/.claude.json`, Codex's and Grok's `config.toml`, `~/.copilot/mcp-config.json`,
+  `~/.cursor/mcp.json`, `~/.gemini/config/mcp_config.json`, `~/.gemini/settings.json`,
+  `~/.qwen/settings.json`, OpenCode's `opencode.json`, `~/.pi/agent/mcp.json`,
+  `~/.junie/mcp/mcp.json`) and writes each one into the others, in their own format.
+  Project files, plugins and hosted connectors are left alone. Edit a server in any agent
+  and the change reaches the copies; delete it from the agent you added it in and it goes
+  everywhere. A server that starts from a relative path, or a transport an agent lacks
+  (SSE in Codex), stays where it works. A config file with comments isn't rewritten;
+  Settings says which. T3 keeps MCP servers out of the profile it runs Antigravity in, so
+  synced servers reach Antigravity only when you run it yourself.
+- **Built in.** Each page lists what ships with the app first, tagged Blackout or T3 Code:
+  `/explain`, and T3's own `t3-code` MCP server (inline pages, threads, worktrees and the
+  rest), which T3 hands to each session itself. It's always on and never copied into
+  agents' settings.
+- Both re-sync on launch and whenever you open or refresh either page.
 - A new skill is a folder with a `SKILL.md` whose frontmatter `name` matches the folder;
   `bin/t3blackout check` rejects one that doesn't.
-
-## Inline HTML pages
-
-HTML pages render inline, through `html_render`, which also accepts the path of a saved
-`.html` file. **Open in browser** on a page opens it in the integrated browser
-(⌘/Ctrl-click: the system browser).
 
 ## Signing and Keychain prompts (macOS)
 
