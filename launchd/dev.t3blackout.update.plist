@@ -16,7 +16,7 @@
     <string>__PATH__</string>
   </dict>
   <key>StartCalendarInterval</key>
-  <dict>
+  <dict>__WEEKDAY__
     <key>Hour</key>
     <integer>__HOUR__</integer>
     <key>Minute</key>

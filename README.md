@@ -1,7 +1,7 @@
 # T3 Blackout
 
 Builds [T3 Code](https://github.com/pingdotgg/t3code) from upstream source with every
-phone-home to T3 and third-party analytics removed, on macOS and Linux. It rebuilds daily
+phone-home to T3 and third-party analytics removed, on macOS and Linux. It rebuilds weekly
 from the newest upstream release, and on demand from the app's update button.
 
 Runtime network enforcement is deliberately not part of this. Sandbox the agents with
@@ -21,8 +21,24 @@ Codex's and Claude Code's own sandboxes work normally.
    They also give the app its own name, bundle ID and data directory, plus its look: the
    T3 BLACKOUT wordmark (an SVG lettered after the Black Ops II logo), the Blackout and Blackout Smoke themes (with a Vignette or Dot glow pattern behind the chat, and a smoked-glass window on macOS), and
    redaction bars in place of upstream's nightly starfield. Each rule states
-   how many times its anchor must match; if upstream moves the code, the update
-   **aborts** and the installed build stays.
+   how many times its anchor must match. What happens when upstream moves that code
+   depends on the rule:
+
+   - **Strict rules** (privacy, identity, the updater, the CSP) stop the update, and the
+     installed build stays. Every rule is strict unless `lib/features.mjs` says otherwise.
+   - **Feature rules** (the look, skills, the spinner) are grouped into
+     features in `lib/features.mjs`. If one stops matching, or stops compiling, the build
+     leaves that whole feature out, plus any feature that requires it, and installs
+     anyway. Upstream's own code runs in its place until the rule is updated.
+
+   Every build writes a report (`lib/drift.mjs`, `lib/looks.mjs`). It opens with
+   screenshots: your installed build and the new one each boot offline with an empty
+   profile, headless Chrome photographs the same screens in both, and the report shows
+   them side by side with what changed highlighted. For each feature left out, it lists
+   the upstream commits and pull requests that touched its code, the diff with the lines
+   the rule hooked into highlighted, and where those lines live now if upstream moved
+   them. Open it from the version stamp's hover card (Blackout themes) or with
+   `bin/t3blackout drift`.
 
    Before the rules run, every hostname that upstream's app source writes as a URL is
    checked against `lib/known-hosts.txt`. An unlisted host also aborts the update: it
@@ -38,9 +54,10 @@ Codex's and Claude Code's own sandboxes work normally.
    - It points the app at `~/.t3blackout`.
 3. **Content-Security-Policy.** The UI can only talk to loopback, so remote images, CDN
    icons and anything upstream adds to the page fail into their existing fallbacks.
-4. **Build verification.** The desktop app is typechecked, so the injected updater still
-   matches upstream's interfaces. The build output, including the packaged app, is
-   scanned for known telemetry endpoints and keys.
+4. **Build verification.** Every package the rules edit is typechecked, so the injected
+   files still match upstream's interfaces. A type error in a file a feature added or
+   edited leaves that feature out; any other type error stops the update. The build
+   output, including the packaged app, is scanned for known telemetry endpoints and keys.
 5. **Smoke test** (`lib/smoke.mjs`). The new server boots with a network tripwire
    preloaded (`lib/files/tripwire.cjs`), an empty `HOME` (no harness credentials) and a
    minimal `PATH`.
@@ -58,8 +75,10 @@ Codex's and Claude Code's own sandboxes work normally.
 Every update is a full rebuild from upstream source through the steps above. Nothing
 prebuilt is ever downloaded.
 
-- **Daily, at 04:00.** It builds the newest release on your update track that is at least
-  **48 hours old**. That trailing window gives a bad upstream release time to be noticed
+- **Weekly, Mondays at 04:00.** One build, and one report to review, a week; the update
+  button builds on demand in between. `bin/t3blackout schedule --day daily` (or another
+  weekday, or `--hour`) changes it. It builds the newest release on your update track that
+  is at least **48 hours old**. That trailing window gives a bad upstream release time to be noticed
   and pulled before it reaches your machines. If T3 Blackout is closed, the new build is
   installed right away. If it's open, the build waits, and the update button in the
   sidebar offers a restart into it. To change the window, set `T3BLACKOUT_SOAK_HOURS` or
@@ -69,18 +88,25 @@ prebuilt is ever downloaded.
   titles as release notes. Clicking it builds the release; the progress ring tracks the
   build. When the build is done, click again to restart into it.
 - **Only checks you start touch the network.** The app's automatic checks (at startup
-  and every 4 minutes) only read local state: a build waiting from the daily run, or a
-  newer tag the daily run already fetched.
+  and every 4 minutes) only read local state: a build waiting from the scheduled run, or a
+  newer tag the scheduled run already fetched.
 - **Update track.** Settings → Update track (Nightly or Stable) applies to both the
-  button and the daily run. The app shows upstream's real version, e.g.
+  button and the scheduled run. The app shows upstream's real version, e.g.
   `0.1.1-nightly.20261017.3238`. Nightly builds use upstream's nightly icon.
+- **A release a strict rule can't handle is skipped.** Before offering or building a
+  release, the update runs the rules against it. If a strict rule no longer matches or
+  upstream names a new host, it falls back to the newest release (up to 5 back) that
+  still works. If none does, it stays on the installed build and says why.
+- **A build with features left out** installs like any other. The notification and the
+  update's release notes name what was left out, and the version stamp shows a hollow
+  dot until a build has everything again.
 - **A failed build** leaves the installed app alone. You get a notification with the
   reason, and the full log is in `state/t3blackout.log`.
 
 ### Separate build account
 
 Every build runs upstream's dependency install scripts and build scripts. That's code
-you haven't read, running unattended at 04:00. So `install.sh` creates an unprivileged
+you haven't read, running unattended. So `install.sh` creates an unprivileged
 account, `_t3blackout`, and the fetch, build and smoke test run as it:
 
 - **Where its files live:** `/private/var/t3blackout-build` on macOS,
@@ -97,7 +123,7 @@ account, `_t3blackout`, and the fetch, build and smoke test run as it:
 
 ### Updates to T3 Blackout itself
 
-Before building, the daily run fast-forwards this clone to origin's `main`. It only
+Before building, every update fast-forwards this clone to origin's `main`. It only
 does so if every new commit is signed by a key listed in `.allowed_signers`, checked
 against that file as it is on the machine, not as the incoming commits would have it.
 That's how a rule fix pushed from one machine reaches the others, without letting
@@ -119,7 +145,8 @@ gh repo clone bmjcoding/t3blackout && cd t3blackout   # any path works
 
 `install.sh` is safe to rerun. It installs what's missing, sets up the build account
 (sudo asks for your password once), builds, verifies, smoke-tests and installs the app,
-then schedules the daily update at 04:00 (`T3BLACKOUT_UPDATE_HOUR` to change it).
+then schedules the update for Mondays at 04:00 (`T3BLACKOUT_UPDATE_DAY`, e.g. `daily`, and
+`T3BLACKOUT_UPDATE_HOUR` change it).
 
 **macOS** (Apple silicon or Intel):
 
@@ -149,10 +176,11 @@ bin/t3blackout update            # newest soaked release on your track → strip
 bin/t3blackout update --channel nightly|preview|stable   # or --ref <tag|sha>; --soak-hours N
 bin/t3blackout poll              # is there a newer release? (--offline: don't fetch)
 bin/t3blackout check             # dry-run the rules against latest upstream (no build)
+bin/t3blackout drift             # open what upstream changed under the features a build left out
 bin/t3blackout smoke             # re-run the zero-egress smoke test on the last build
 bin/t3blackout launch            # open the app, installing a waiting build first
 bin/t3blackout status | rollback
-bin/t3blackout schedule --hour 4 | unschedule
+bin/t3blackout schedule --day monday --hour 4 | unschedule   # --day daily for every day
 bin/t3blackout signing adopt|import|init|status --vault Personal   # macOS only
 ```
 
@@ -184,25 +212,11 @@ any provider's composer: `/explain <topic>` draws the topic as a page in the thr
 - A new skill is a folder with a `SKILL.md` whose frontmatter `name` matches the folder;
   `bin/t3blackout check` rejects one that doesn't.
 
-## Chat mode
+## Inline HTML pages
 
-The **Chat | Code** switch at the top of the sidebar splits conversations from code work,
-like Claude's desktop app. Chat mode lists your chats (New chat, Artifacts, Pinned,
-Recents); Code mode lists project threads, without the chats.
-
-- A chat is upstream's "No project" thread: it gets its own folder in
-  `~/.t3blackout/scratch`. On creation the app writes an `AGENTS.md` (and a `CLAUDE.md`
-  that imports it) there, telling whichever agent runs it to answer in the thread and save
-  anything worth keeping only as `.md` or `.html` files in that folder.
-- HTML pages render inline, through `html_render`, which also accepts the path of a saved
-  `.html` file. **Open in browser** on a page opens it in the integrated browser
-  (⌘/Ctrl-click: the system browser). Markdown opens in the app's file viewer, rendered.
-- **Artifacts** lists every `.md` and `.html` file your chats have saved.
-- **Transfer to code** (a chat's header, its menu, or right-click in Recents) opens the
-  project picker. Pick a project, or add or create one, and the chat moves there as a normal
-  thread. The agent's session resumes in the project folder with the whole conversation,
-  and the chat-only rules no longer apply. A chat has to be idle to move.
-- The mode follows what's open, and switching back returns to the last chat or thread.
+HTML pages render inline, through `html_render`, which also accepts the path of a saved
+`.html` file. **Open in browser** on a page opens it in the integrated browser
+(⌘/Ctrl-click: the system browser).
 
 ## Signing and Keychain prompts (macOS)
 
@@ -242,10 +256,12 @@ every update. Signing never contacts Apple, because no timestamp is requested.
 - **Remote images in chat don't render.** GitHub images still work (the server fetches
   them). Link favicons show a generic icon.
 - **Updates take a minute or two.** Each one is a local build, not a download.
-- **No provider CLI update nudges.** That check talks only to npm and GitHub. Turn it
-  back on in Settings if you want it.
-- **The model list is the one bundled in each build.** Daily rebuilds keep it at most
-  about a day behind upstream.
+- **Provider CLI updates work as upstream ships them.** To offer Update on a provider in
+  Settings, the server asks npm and GitHub (never T3) for the latest version of each CLI
+  you have installed. Turn off **Provider update checks** in Settings to stop that; the
+  bundled model list stays bundled either way.
+- **The model list is the one bundled in each build.** Weekly rebuilds keep it at most
+  about a week behind upstream; the update button brings it current.
 - **Cost estimates are unaffected.** `update` downloads the LiteLLM pricing table and
   seeds the app's cache; the app never fetches it.
 
@@ -255,12 +271,14 @@ every update. Signing never contacts Apple, because no timestamp is requested.
 is untouched, and the update button offers the release again so you can retry. The usual
 causes are:
 
-- **A rule no longer matches.** Upstream changed that code. Update the anchor in
-  `lib/rules.mjs` (`bin/t3blackout check` iterates quickly).
+- **A strict rule no longer matches.** Upstream changed that code. `bin/t3blackout
+  drift` shows how; update the anchor in `lib/rules.mjs` (`bin/t3blackout check`
+  iterates quickly). Feature rules never fail an update; they're left out instead.
 - **The smoke test saw outbound traffic.** Upstream added a new network call. The host
   is in the error. Add a rule that disables it.
-- **The desktop typecheck failed.** Upstream changed the updater interface that
-  `lib/files/BlackoutUpdater.ts` implements. Update that file to match.
+- **The typecheck failed outside a feature.** Upstream changed an interface a strict
+  file uses, such as the updater interface `lib/files/BlackoutUpdater.ts` implements.
+  Update that file to match.
 
 ## Planned
 

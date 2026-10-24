@@ -2,8 +2,8 @@
 # T3 Blackout installer for macOS and Linux. Safe to rerun: every step checks
 # before acting.
 #
-#   ./install.sh                       # daily update at 04:00 (macOS: vault "Personal")
-#   T3BLACKOUT_UPDATE_HOUR=6 T3BLACKOUT_VAULT=Other ./install.sh
+#   ./install.sh                       # weekly update, Mondays at 04:00 (macOS: vault "Personal")
+#   T3BLACKOUT_UPDATE_DAY=daily T3BLACKOUT_UPDATE_HOUR=6 T3BLACKOUT_VAULT=Other ./install.sh
 #
 # macOS: installs missing tools with Homebrew, sets up the shared signing
 #   identity from 1Password (from your Apple Development certificate on the
@@ -13,13 +13,14 @@
 #   builds and installs. No signing step: Linux keyrings don't tie access to an
 #   app's signature.
 # Both: creates a separate, unprivileged build account (_t3blackout) so the
-#   daily build's dependency and build scripts can't read your home. Needs sudo
+#   scheduled build's dependency and build scripts can't read your home. Needs sudo
 #   once; without it, builds run as you.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
 HOUR="${T3BLACKOUT_UPDATE_HOUR:-4}"
+DAY="${T3BLACKOUT_UPDATE_DAY:-monday}"
 VAULT="${T3BLACKOUT_VAULT:-Personal}"
 OP_ITEM="T3 Blackout code signing"
 NODE_MAJOR=24
@@ -278,8 +279,8 @@ fi
 say "Building and installing T3 Blackout (a few minutes on first run)"
 bin/t3blackout update
 
-say "Scheduling the daily update at ${HOUR}:00"
-bin/t3blackout schedule --hour "$HOUR" || say "Couldn't schedule automatic updates here; run bin/t3blackout update by hand."
+say "Scheduling the update: ${DAY}, ${HOUR}:00"
+bin/t3blackout schedule --hour "$HOUR" --day "$DAY" || say "Couldn't schedule automatic updates here; run bin/t3blackout update by hand."
 
 say "Done"
 bin/t3blackout status

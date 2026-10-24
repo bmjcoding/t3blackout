@@ -1,7 +1,8 @@
 // Injected by t3blackout. The sidebar wordmark and the nightly stage art; the
 // art is styled in t3blackout.css.
 
-import { useId, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useState, type MouseEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 import { openDesktopUpdateReleaseNotes } from "./desktopUpdate.toast";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
@@ -71,11 +72,14 @@ export function BlackoutRedactedArt() {
 type Change = (typeof T3BLACKOUT_BUILD)["upstream"]["items"][number];
 
 /** Opens in the browser: through the desktop shell in the app, a new tab on the web. */
-function openLink(event: MouseEvent<HTMLAnchorElement>) {
-  event.preventDefault();
-  const url = event.currentTarget.href;
+function openUrl(url: string) {
   if (window.desktopBridge) void openDesktopUpdateReleaseNotes(window.desktopBridge, url);
   else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function openLink(event: MouseEvent<HTMLAnchorElement>) {
+  event.preventDefault();
+  openUrl(event.currentTarget.href);
 }
 
 function ExternalLink({ href, children }: { readonly href: string; readonly children: string }) {
@@ -144,21 +148,121 @@ function ChangeList({
 }
 
 /**
+ * The desktop's copy of this build's report, screenshots included (state/drift,
+ * written after the build). Cast rather than typed: the bridge method is its own
+ * feature (lib/features.mjs), and this file must build without it.
+ */
+const reportBridge = () =>
+  (window.desktopBridge as { getBlackoutDriftReport?: () => Promise<string | null> } | undefined)?.getBlackoutDriftReport;
+
+/** Features this build left out (lib/features.mjs), and the way into the report. */
+function WhatChanged({ onOpen }: { readonly onOpen: () => void }) {
+  const skipped = T3BLACKOUT_BUILD.skipped;
+  if (skipped.length === 0 && !reportBridge()) return null;
+  return (
+    <section className="t3b-version-drift">
+      {skipped.length > 0 ? (
+        <>
+          <h4>
+            Left out<span> · upstream moved their code</span>
+          </h4>
+          <ul>
+            {skipped.map((feature) => (
+              <li key={feature.name}>
+                {feature.label}
+                {feature.reason === "requires" && feature.requires ? <span> (needs {feature.requires})</span> : null}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      <button onClick={onOpen} type="button">
+        See what changed
+      </button>
+    </section>
+  );
+}
+
+/**
+ * This build's report (lib/drift.mjs) in a frame over the window: the desktop's
+ * copy with screenshots, else the one baked into t3blackoutDrift.ts. It has no
+ * scripts; links open in the browser, # links scroll.
+ */
+function DriftReport({ onClose }: { readonly onClose: () => void }) {
+  const [html, setHtml] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    const baked = () => import("../t3blackoutDrift").then((module) => module.T3BLACKOUT_DRIFT_REPORT);
+    const fromDesktop = reportBridge();
+    void (fromDesktop ? fromDesktop().catch(() => null) : Promise.resolve(null))
+      .then((report) => report ?? baked())
+      .then(setHtml);
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const routeLinks = (frame: HTMLIFrameElement) => {
+    const doc = frame.contentDocument;
+    doc?.addEventListener("click", (event) => {
+      const link = (event.target as Element | null)?.closest?.("a[href]");
+      const href = link?.getAttribute("href");
+      if (!href) return;
+      event.preventDefault();
+      if (href.startsWith("#")) doc.getElementById(href.slice(1))?.scrollIntoView({ behavior: "smooth" });
+      else openUrl(href);
+    });
+    doc?.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") onClose();
+    });
+  };
+  return createPortal(
+    <div aria-label="What changed" aria-modal="true" className="t3b-drift" onClick={onClose} role="dialog">
+      <div className="t3b-drift-panel" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <b>What changed</b>
+          <button aria-label="Close" onClick={onClose} type="button">
+            ×
+          </button>
+        </header>
+        {html ? (
+          <iframe onLoad={(event) => routeLinks(event.currentTarget)} srcDoc={html} title="What changed" />
+        ) : (
+          <p>{html === null ? "This build has no report." : "Loading…"}</p>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
  * The full build version (e.g. 0.1.1-nightly.20261017.3238), stamped into the
  * window's bottom-right corner in the Blackout themes; t3blackout.css hides it
  * elsewhere. Hovering or focusing it shows what the build changed, baked in at
  * build time (t3blackoutBuild.ts). The desktop's reported version wins if the
- * bundle predates a rename.
+ * bundle predates a rename. A build that left features out shows a hollow dot,
+ * and the card lists them with a way into what upstream changed.
  */
 export function BlackoutVersionStamp() {
   const desktopVersion = useDesktopUpdateState()?.currentVersion;
   const build = T3BLACKOUT_BUILD;
   const version = desktopVersion ?? build.version ?? "dev";
+  const [reportOpen, setReportOpen] = useState(false);
+  const closeReport = useCallback(() => setReportOpen(false), []);
   const built = build.builtAt
     ? new Date(build.builtAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
     : null;
   return (
-    <div aria-label={`T3 Blackout ${version}`} className="t3b-version-stamp" role="note" tabIndex={0}>
+    <div
+      aria-label={`T3 Blackout ${version}`}
+      className="t3b-version-stamp"
+      data-drift={build.skipped.length > 0 ? "" : undefined}
+      role="note"
+      tabIndex={0}
+    >
       <i />
       {version}
       <div className="t3b-version-notes">
@@ -182,8 +286,10 @@ export function BlackoutVersionStamp() {
             render={(change, repo) => <BlackoutTitle change={change} repo={repo} />}
             title="T3 Blackout"
           />
+          <WhatChanged onOpen={() => setReportOpen(true)} />
         </div>
       </div>
+      {reportOpen ? <DriftReport onClose={closeReport} /> : null}
     </div>
   );
 }

@@ -1,8 +1,8 @@
 [Unit]
-Description=Daily T3 Blackout update
+Description=Scheduled T3 Blackout update
 
 [Timer]
-OnCalendar=*-*-* __HOUR__:00:00
+OnCalendar=__DAY__*-*-* __HOUR__:00:00
 # Run at the next boot/login if the machine was off at the scheduled time.
 Persistent=true
 
