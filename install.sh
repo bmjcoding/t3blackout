@@ -71,6 +71,7 @@ NODE_CHECK='
   process.exit(maj >= Number(process.argv[2]) && patched ? 0 : 1);
 '
 # Whether node ($1, default the one on PATH) is Node $NODE_MAJOR+ with the security floor.
+# shellcheck disable=SC2120 # $1 is for tests; the script itself checks the node on PATH
 node_ok() {
   local node="${1:-node}"
   have "$node" && "$node" -e "$NODE_CHECK" "$NODE_PATCHED" "$NODE_MAJOR"
