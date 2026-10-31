@@ -1,0 +1,105 @@
+# Hostnames upstream's app source reaches for, as URLs. Every update scans the
+# upstream checkout (before stripping) and fails if it finds a host not listed
+# here: a new host can be a new phone-home that no strip rule or smoke test
+# would notice. Tests, fixtures and docs aren't scanned.
+#
+# Being listed means looked at, not allowed. For a new host, find what talks
+# to it (the failure names the file and line), then either add a strip rule
+# or add it here with a note saying why it's fine.
+#
+# Baseline: v0.1.1-nightly.20261019.3360.
+#
+# Hosts are read the way a URL parser reads them (lowercase, punycode, without
+# userinfo or a trailing dot), IP addresses included; for a host built at
+# runtime (`${region}.example.org`), the domain written after the expression.
+#
+# Never listed here: reserved names that can't resolve (.invalid, .test,
+# .localhost, .example) and loopback addresses. The scan skips them itself
+# (lib/build.mjs isReservedHost). example.com, example.net and example.org are
+# not among them: they're real domains that resolve, so each use is listed.
+
+accounts.google.com
+accounts.x.ai
+agentclientprotocol.com
+api.anthropic.com
+api.bitbucket.org
+api.example.com # placeholder text in Settings -> ACP session management's URL field
+api.expo.dev # EAS device hosts (upstream #21843); only with your own Expo token or eas login
+api.github.com # LiteLLM pricing fallback is disabled by server/litellm-rates-off; also source control
+api.meta.ai
+api.openai.com
+api2.cursor.sh
+app.example.com # doc comment in the generated Expo GraphQL schema (apps/server/schema)
+app.invalid
+app.t3.codes
+apps.apple.com
+auth.openai.com
+auth.x.ai
+bitbucket.org
+box.example.ts.net # placeholder text in Settings -> Linked environments' URL field
+cdn.agentclientprotocol.com
+challenges.cloudflare.com
+chatgpt.com
+claude.ai
+cli-chat-proxy.grok.com
+cli.github.com
+cloudcode-pa.googleapis.com
+codeberg.org
+coss.com
+cursor.com
+daily-cloudcode-pa.googleapis.com
+dev.azure.com
+developers.openai.com
+dl.google.com
+docs.github.com
+duckduckgo.com
+example.com # placeholder search URL in Settings -> Integrations
+example.invalid
+gateway.example.ts.net # placeholder text in Settings -> Labs -> Simlock gateway URL field
+git-scm.com
+git.cafe
+gitea.com
+github.com
+github.githubassets.com
+gitlab.com
+googlechromelabs.github.io
+hub.example.ts.net # placeholder text in the add-usage-limit-source dialog's URL field
+incubator.callstack.com # docs link (opened in your browser) beside Settings -> Labs -> Simlock
+ingest.t3.codes # telemetry since upstream 28c32d20c3; server/analytics-defaults empties it, forbiddenInBuild
+json-schema.org
+kagi.com
+latest.app.t3.codes
+login.tailscale.com # link in an error message (apps/server/src/cli/pair.ts)
+machine.tailnet.ts.net # placeholder text in the link-request card's URL field
+media.invalid
+nightly.app.t3.codes
+oauth2.googleapis.com
+open-vsx.org
+opencode.ai
+platform.claude.com
+platform.openai.com
+play.google.com
+raw.githubusercontent.com
+registry.npmjs.org
+relay.invalid
+schemas.openxmlformats.org # XML namespace URIs the Word preview compares strings against; never fetched
+search.brave.com
+spell.sh
+storage.googleapis.com
+t3-page.localhost
+t3.chat
+t3.codes
+t3.invalid
+tailwindcss.com
+ui.shadcn.com
+us.i.posthog.com # telemetry before upstream 28c32d20c3; server/analytics-defaults empties it
+www.apple.com
+www.bing.com
+www.ecma-international.org # spec link in a generated schema comment
+www.ecosia.org
+www.google.com
+www.googleapis.com
+www.idpf.org # EPUB OPF XML namespace, compared as a string in the document preview
+www.jsonrpc.org
+www.nayuki.io
+www.w3.org

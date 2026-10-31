@@ -1,0 +1,410 @@
+/* Injected by t3blackout and imported after index.css. Deliberately unlayered:
+   unlayered rules beat Tailwind's @layer utilities without !important, which
+   is how the send button and composer overrides below win. */
+
+:root {
+  /* Everything orange here is the selected theme's accent, so a theme or a
+     custom copy with another accent recolours it all.
+     Ember is the accent lifted a step, for rings, text and links on black;
+     deep is the shade the wordmark's T3 settles into at its foot. */
+  --t3b-accent: var(--app-theme-accent, var(--primary));
+  --t3b-ember: oklch(from var(--t3b-accent) calc(l + 0.06) c h);
+  --t3b-deep: oklch(from var(--t3b-accent) calc(l - 0.155) calc(c * 0.82) h);
+  --t3b-black: #0a0a0a;
+}
+
+/* ------------------------------------------------------------- wordmark -- */
+
+/* 11px tall at the default 16px interface size; rem so it follows the
+   Settings -> Appearance interface size like the text around it. */
+.t3b-wordmark {
+  display: block;
+  flex-shrink: 0;
+  height: 0.6875rem;
+  width: auto;
+}
+
+/* T3 runs ember to accent to deep down its height (BlackoutBrand.tsx), and
+   BLACKOUT is a graphite gradient on dark themes. On light themes graphite
+   would vanish into nothing, so it's the sidebar's text colour instead. */
+html:not(.dark) .t3b-wordmark {
+  --t3b-ops-1: color-mix(in oklab, var(--sidebar-foreground, #111) 85%, transparent);
+  --t3b-ops-2: color-mix(in oklab, var(--sidebar-foreground, #111) 75%, transparent);
+  --t3b-ops-3: color-mix(in oklab, var(--sidebar-foreground, #111) 60%, transparent);
+}
+
+/* ---------------------------------------------------- nightly stage art -- */
+
+/* The bars start just past the wordmark: its left offset (set on the sidebar,
+   absent on the sign-in screen) plus its width, 10.445 x its 0.6875rem height,
+   plus a 9px gap. They're a fixed-size 186px tile repeated rightward, so a wider
+   sidebar shows more document instead of stretching the bars, and a narrower one
+   crops it; the last 24px fade so cut bars don't end abruptly. */
+/* The sidebar's own colour, so it sits flush in any theme; the bars are the
+   sidebar's text colour at a whisper, drawn through a mask. */
+.t3b-redacted {
+  --t3b-bars-left: calc(var(--workspace-titlebar-content-left, 20px) + 7.18rem + 9px);
+  position: relative;
+  overflow: hidden;
+  background: var(--sidebar);
+}
+
+.t3b-redacted-bars {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 52px;
+  left: var(--t3b-bars-left);
+  background: color-mix(in oklab, var(--sidebar-foreground, #fff) 7%, transparent);
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='186' height='52' fill='%23171513'%3E%3Crect x='0' y='8' width='34' height='5' rx='1'/%3E%3Crect x='40' y='8' width='24' height='5' rx='1'/%3E%3Crect x='70' y='8' width='52' height='5' rx='1'/%3E%3Crect x='128' y='8' width='50' height='5' rx='1'/%3E%3Crect x='4' y='17' width='58' height='5' rx='1'/%3E%3Crect x='68' y='17' width='30' height='5' rx='1'/%3E%3Crect x='104' y='17' width='74' height='5' rx='1'/%3E%3Crect x='0' y='26' width='20' height='5' rx='1'/%3E%3Crect x='78' y='26' width='44' height='5' rx='1'/%3E%3Crect x='128' y='26' width='52' height='5' rx='1'/%3E%3Crect x='0' y='35' width='44' height='5' rx='1'/%3E%3Crect x='50' y='35' width='14' height='5' rx='1'/%3E%3Crect x='70' y='35' width='60' height='5' rx='1'/%3E%3Crect x='136' y='35' width='42' height='5' rx='1'/%3E%3Crect x='12' y='44' width='50' height='5' rx='1'/%3E%3Crect x='68' y='44' width='40' height='5' rx='1'/%3E%3Crect x='114' y='44' width='64' height='5' rx='1'/%3E%3C/svg%3E"), linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+  mask-repeat: repeat-x, no-repeat;
+  mask-size: 186px 52px, 100% 100%;
+  mask-composite: intersect;
+}
+
+/* The accent strike through the gap in the bars' third row (x 26-70 of the
+   first tile). A sibling of the bars, not a child: their mask cuts that gap. */
+.t3b-redacted-strike {
+  position: absolute;
+  left: calc(var(--t3b-bars-left) + 26px);
+  top: 27px;
+  width: 44px;
+  height: 2px;
+  background: color-mix(in oklab, var(--t3b-accent) 35%, transparent);
+}
+
+/* ---------------------------------------------------------- send button -- */
+
+/* Replaces upstream's send button on every track and theme (the starfield fill
+   on nightly) while Settings -> Appearance -> Send button ring is on. */
+html[data-t3b-send="on"] [data-t3b-send] {
+  background: color-mix(in oklab, var(--t3b-ember) 10%, var(--t3b-black));
+  color: var(--t3b-ember);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--t3b-ember) 55%, transparent),
+    0 0 18px color-mix(in oklab, var(--t3b-accent) 35%, transparent);
+}
+
+html[data-t3b-send="on"] [data-t3b-send]:hover:not(:disabled) {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--t3b-ember) 75%, transparent),
+    0 0 24px color-mix(in oklab, var(--t3b-accent) 50%, transparent);
+}
+
+html[data-t3b-send="on"] [data-t3b-send]:disabled {
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--t3b-ember) 25%, transparent);
+}
+
+/* ------------------------------------------------------------- composer -- */
+
+/* Only while the chat box has focus: warm its outline and top highlight (both
+   variables upstream sets per theme) and add a glow, whenever the send button
+   above is ringed. */
+html[data-t3b-send="on"] [data-slot="composer-shell"]:focus-within {
+  --chat-composer-outline: color-mix(in oklab, var(--t3b-ember) 22%, var(--t3b-black));
+  --chat-composer-highlight: color-mix(in oklab, var(--t3b-ember) 25%, transparent);
+}
+
+html[data-t3b-send="on"] [data-slot="composer-shell"] :is([data-slot="composer-host"], [data-chat-composer-main-surface]) {
+  transition: box-shadow 200ms ease-out;
+}
+
+/* The glow goes on the host, which is the chat box's outline, unless a tray
+   (Queued and the like) is attached above it. The host then spans the tray's
+   inset gutters too, so the glow would trace empty corners either side of the
+   tray; it moves to the chat box itself instead. */
+html[data-t3b-send="on"] [data-slot="composer-shell"]:not(:has([data-composer-banner-surface="attached"])):focus-within [data-slot="composer-host"],
+html[data-t3b-send="on"] [data-slot="composer-shell"]:has([data-composer-banner-surface="attached"]):focus-within [data-chat-composer-main-surface] {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--t3b-ember) 8%, transparent),
+    0 0 32px -6px color-mix(in oklab, var(--t3b-accent) 30%, transparent),
+    0 20px 60px rgb(0 0 0 / 50%);
+}
+
+/* ------------------------------------------------------- version stamp -- */
+
+/* The build version in the window's bottom-right corner, styled as a redaction
+   stamp, with what the build changed on hover or focus. BlackoutBrand.tsx only
+   renders it while Settings -> Appearance -> Version stamp is on. */
+.t3b-version-stamp {
+  position: fixed;
+  right: 12px;
+  bottom: 10px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 2px;
+  background: #000;
+  box-shadow: 0 0 0 1px var(--t3b-card-edge);
+  color: var(--t3b-ember);
+  font: 700 9.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.06em;
+  cursor: default;
+  outline: none;
+  user-select: none;
+}
+
+.t3b-version-stamp:focus-visible {
+  box-shadow: 0 0 0 1px var(--t3b-ember);
+}
+
+.t3b-version-stamp > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--t3b-ember);
+}
+
+/* Near-neutral greys warmed a touch toward the accent, so the card sits with
+   whatever colour the theme uses. */
+:root {
+  --t3b-card: color-mix(in oklab, var(--t3b-accent) 3%, #111111);
+  --t3b-card-edge: color-mix(in oklab, var(--t3b-accent) 6%, #1c1c1c);
+  --t3b-card-border: color-mix(in oklab, var(--t3b-accent) 6%, #262626);
+  --t3b-card-text: color-mix(in oklab, var(--t3b-accent) 6%, #d8d8d8);
+  --t3b-card-heading: color-mix(in oklab, var(--t3b-accent) 4%, #ededed);
+  --t3b-card-muted: color-mix(in oklab, var(--t3b-accent) 10%, #7c7c7c);
+}
+
+/* The card sits above the stamp; its bottom padding bridges the gap so the
+   pointer can travel up into it without it closing. */
+.t3b-version-notes {
+  position: absolute;
+  right: -1px;
+  bottom: 100%;
+  display: none;
+  padding-bottom: 8px;
+}
+
+.t3b-version-stamp:is(:hover, :focus-within) .t3b-version-notes {
+  display: block;
+}
+
+.t3b-version-card {
+  width: 340px;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--t3b-card);
+  box-shadow:
+    0 0 0 1px var(--t3b-card-border),
+    0 16px 40px rgb(0 0 0 / 55%);
+  color: var(--t3b-card-text);
+  font: 400 12px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  letter-spacing: normal;
+  user-select: text;
+}
+
+.t3b-version-card header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--t3b-card-edge);
+}
+
+.t3b-version-card header b {
+  color: var(--t3b-ember);
+  font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.t3b-version-card header small {
+  color: var(--t3b-card-muted);
+  font-size: 11px;
+}
+
+.t3b-version-card section {
+  padding-top: 10px;
+}
+
+.t3b-version-card h4 {
+  margin: 0 0 4px;
+  color: var(--t3b-card-heading);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.t3b-version-card h4 span {
+  color: var(--t3b-card-muted);
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.t3b-version-card ul {
+  margin: 0;
+  padding-left: 14px;
+}
+
+.t3b-version-card li {
+  margin: 2px 0;
+}
+
+.t3b-version-card li::marker {
+  color: var(--t3b-ember);
+}
+
+.t3b-version-card p {
+  margin: 0;
+  color: var(--t3b-card-muted);
+}
+
+/* Pull request numbers and commit IDs, in ember. */
+.t3b-version-card a {
+  color: var(--t3b-ember);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.t3b-version-card a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.t3b-version-card code {
+  color: var(--t3b-card-muted);
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* A build that left features out: a hollow dot, and the list leads the card's end. */
+.t3b-version-stamp[data-drift] > i {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--t3b-ember);
+}
+
+.t3b-version-card .t3b-version-drift {
+  margin-top: 10px;
+  border-top: 1px solid var(--t3b-card-edge);
+}
+
+.t3b-version-drift li span {
+  color: var(--t3b-card-muted);
+}
+
+.t3b-version-drift button {
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--t3b-ember) 16%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--t3b-ember) 40%, transparent);
+  color: var(--t3b-ember);
+  font: 600 11.5px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.t3b-version-drift button:hover {
+  background: color-mix(in oklab, var(--t3b-ember) 26%, transparent);
+}
+
+.t3b-version-next > div {
+  display: flex;
+  gap: 6px;
+}
+
+.t3b-version-next p {
+  margin-top: 6px;
+}
+
+/* A staged build: a ring around the dot. */
+.t3b-version-stamp[data-next] > i {
+  outline: 1.5px solid color-mix(in oklab, var(--t3b-ember) 55%, transparent);
+  outline-offset: 2px;
+}
+
+/* The drift report, over the window. */
+/* Upstream's dialog (BlackoutBrand.tsx) supplies the backdrop and focus
+   handling; this sizes its popup for the report page. */
+.t3b-drift-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, 94vw);
+  max-width: none;
+  height: 90vh;
+  max-height: none;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #0b0b0c;
+  box-shadow:
+    0 0 0 1px var(--t3b-card-border),
+    0 24px 60px rgb(0 0 0 / 60%);
+}
+
+.t3b-drift-panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--t3b-card-edge);
+  color: var(--t3b-card-heading);
+  font: 600 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+
+.t3b-drift-panel header [data-slot="dialog-title"] {
+  margin: 0;
+  font: inherit;
+}
+
+.t3b-drift-panel header button {
+  border: 0;
+  background: none;
+  color: var(--t3b-card-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.t3b-drift-panel header button:hover {
+  color: var(--t3b-card-heading);
+}
+
+.t3b-drift-panel iframe {
+  flex: 1;
+  width: 100%;
+  border: 0;
+}
+
+.t3b-drift-panel p {
+  margin: 24px;
+  color: var(--t3b-card-muted);
+}
+
+/* ------------------------------------------------------- icon-button glow -- */
+
+/* The send button's ring and glow, on hover, for the other icon-only buttons
+   (sidebar footer, update, attach), marked with data-t3b-glow, while Settings ->
+   Appearance -> Button glow is on (t3blackoutInterface.ts). It takes the
+   send button's ember, the theme's accent lifted a step, so the two match. */
+:root {
+  --t3b-glow: var(--t3b-ember);
+}
+
+html[data-t3b-glow="on"] [data-t3b-glow] {
+  transition:
+    box-shadow 150ms ease-out,
+    color 150ms ease-out,
+    background-color 150ms ease-out;
+}
+
+html[data-t3b-glow="on"] [data-t3b-glow]:hover:not(:disabled, [aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--t3b-glow) 12%, transparent);
+  color: var(--t3b-glow);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--t3b-glow) 55%, transparent),
+    0 0 18px color-mix(in oklab, var(--t3b-glow) 35%, transparent);
+}
+
+/* ------------------------------------------------------- text selection -- */
+
+/* Upstream leaves selected text to the system highlight, macOS blue on every
+   theme; it takes the theme's accent instead. Text keeps its own colour. */
+html[data-t3b-selection="on"] ::selection {
+  background-color: color-mix(in oklab, var(--t3b-accent) 38%, transparent);
+}

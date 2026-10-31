@@ -1,0 +1,23 @@
+# Device tools upstream pins in apps/server/src/device/deviceToolVersions.json, as
+# name@version. The app npm-installs these into ~/.t3blackout/tools when device
+# support is turned on, so they never pass through the strip rules or the host scan.
+# Every update fails if upstream pins a version not listed here (or cleared by the
+# evaluator in pin.json). Each installs with `npm ci` from the dependency closure
+# checked for it at build time (lib/device-tools.mjs): its dependencies as npm
+# resolved them when the tool was published, each at least 3 days old.
+#
+# Being listed means read, not trusted forever. For a new version:
+#   npm pack <name>@<version> && tar xzf <name>-<version>.tgz
+# then look through package/ for URLs, fetch/WebSocket/http calls and analytics
+# (posthog, sentry, segment, amplitude, mixpanel, telemetry), and note what you found.
+
+# Hub server and simulator streaming. No external hosts in its server code; its
+# connections are local WebSocket/HTTP to the simulator and Metro. The "sentry"
+# match is the variable name nsEntry.
+expo-device-hub@0.15.3
+
+# Device automation CLI. telemetry.js only writes a gesture log beside recordings.
+# Its npm update check is off: T3 sets AGENT_DEVICE_NO_UPDATE_NOTIFIER=1, and it
+# skips non-TTY shells. Cloud providers (BrowserStack, Limrun, AWS Device Farm,
+# cloud.agent-device.dev) are reached only after `agent-device connect <provider>`.
+agent-device@0.21.25

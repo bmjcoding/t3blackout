@@ -1,0 +1,9 @@
+[Unit]
+Description=Update T3 Blackout to the pinned upstream release
+
+[Service]
+Type=oneshot
+Environment=__PATH_ASSIGNMENT__
+ExecStart=__NODE__ __LAUNCHER__ update
+Nice=10
+IOSchedulingClass=idle

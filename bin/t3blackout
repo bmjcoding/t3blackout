@@ -1,0 +1,1331 @@
+#!/usr/bin/env node
+// t3blackout: build upstream T3 Code with every phone-home stripped.
+//
+//   t3blackout update [--ref <tag|branch|sha>] [--channel nightly|preview|stable] [--force] [--stage-only] [--unpinned]
+//                     [--expect-sha SHA]   the app's download: build only if SHA is still the approved release
+//   t3blackout check  [--ref ...] [--build]   apply strip rules to the pinned release (--ref: any) without
+//                                      installing; --build also builds, scans and smoke-tests it
+//   t3blackout drift                   open what upstream changed under the features a build left out
+//   t3blackout preview [--installed]   try the staged build in a sandboxed window before restarting into it
+//   t3blackout review [--installed]    gather the staged build's report and upstream commits for an agent
+//   t3blackout poll [--offline]        is a newer upstream release available?
+//   t3blackout apply [--wait-pid N] [--expect-sha SHA --expect-blackout SHA]
+//                                      install a staged build once the app has quit (only the expected one), relaunch it
+//   t3blackout smoke                   re-run the zero-egress smoke test on the last build
+//   t3blackout launch                  open the installed app (installs a staged build first)
+//   t3blackout status                  installed version, schedule, build account, signing
+//   t3blackout rollback                swap back to the previously installed build
+//   t3blackout schedule [--day hourly|daily|monday] [--hour 4] | unschedule   hourly (default), daily or weekly
+//   t3blackout configure [--role ui|host|both]   save the install's role and locations (install.sh runs it;
+//                                      a changed role moves the scheduled job at the next `schedule`)
+//   t3blackout signing adopt|import|init|status [--vault V]   macOS: shared signing identity via 1Password
+//   t3blackout evaluate [--channel nightly] [--ref TAG] [--baseline TAG] [--build] [--write] [--report FILE] [--resolved DIR]
+//                       [--stage-from DIR]
+//                                      CI: pin the newest upstream release that passes every gate
+//   t3blackout pin-check [--candidate FILE --channel C --resolved DIR --result FILE]
+//                                      CI: re-derive a candidate pin's gates before it is signed
+//                                      (alone: check each pinned tag still names its commit upstream)
+//   t3blackout advisories --channel C --resolved DIR --out FILE   CI: advisories against main's pin
+//   t3blackout releases --channel C [--out FILE]   CI: upstream releases newer than main's pin
+//
+// With pin.json (proposed by the evaluator in CI, re-checked here by self-update),
+// every machine builds the pinned release for its channel, and a channel pin.json
+// doesn't pin is refused unless --unpinned is given. Without a pin.json, or with
+// --unpinned on a channel it doesn't pin, releases are built once they're
+// --soak-hours old (default 48), with none of the evaluator's gates; --unpinned
+// never bypasses a channel's pin.
+// Fetching and building run as the separate build account when install.sh set one up.
+//
+// A feature whose rules no longer match upstream is left out of the build
+// (lib/features.mjs) and the update goes ahead; a strict rule (privacy, identity,
+// the updater) that no longer matches holds the update at the newest release it
+// still applies to.
+
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { parseArgs } from "node:util";
+
+// First: applies the install's saved locations before the modules below read them.
+import { installConfig, installConfigError } from "../lib/load-install-config.mjs";
+import { saveInstallConfig } from "../lib/install-config.mjs";
+import { writeFileAtomic, writeJsonAtomic } from "../lib/atomic-file.mjs";
+import { HANDED_ENV, HANDED_FD, adoptLock, runHoldingLock, tryLock as takeFileLock } from "../lib/lock.mjs";
+import { installBuild, recoverActivation, rollBackBuild } from "../lib/platform/app.mjs";
+import { WEEKDAYS, cliShim, parseSchedule } from "../lib/platform/jobs.mjs";
+import { clearRequests } from "../lib/shared-dir.mjs";
+import { allowDeviceTools, buildArtifact, checkRules, isKnownHost, knownDeviceTools, resolveLockfile } from "../lib/build.mjs";
+import { advisoryReport, evaluateChannel, networkIo, newerReleases, openAdvisories } from "../lib/evaluate.mjs";
+import { MIN_AGE_DAYS, latestReviewed, npmMeta } from "../lib/gates.mjs";
+import { reviewToolClosure, splitPin } from "../lib/device-tools.mjs";
+import { toolClosurePackages } from "../lib/inventory.mjs";
+import { emptyPin, readPin, unreleasedPin, writePin } from "../lib/pin.mjs";
+import { verifyCandidate } from "../lib/pincheck.mjs";
+import { builderReachable, runAsBuilder } from "../lib/builder.mjs";
+import { channelPolicy, unpinnedProblem } from "../lib/channels.mjs";
+import { emptyDrift, renderDriftReport } from "../lib/drift.mjs";
+import { emit, enableEvents, progress } from "../lib/events.mjs";
+import { expectedBuild, isExpectedBuild, pollOffer, staleRulesProblem, unexpectedBuildMessage } from "../lib/expect.mjs";
+import { featureByName, features } from "../lib/features.mjs";
+import { captureLooks, packagedEgress } from "../lib/looks.mjs";
+import { preview } from "../lib/preview.mjs";
+import { forbiddenInBuild } from "../lib/rules.mjs";
+import { selfUpdate } from "../lib/selfupdate.mjs";
+import { smokeTest } from "../lib/smoke.mjs";
+import { scanForbidden } from "../lib/strip-engine.mjs";
+import { SOAK_HOURS, cliChannel, commitDetails, commitTime, fetchUpstreamHere, githubWebUrl, hasMirror, mirrorTags, parseCommitLines, previousTag, releaseNotes, resolveRef, revParse, soakedTags, upstreamCommits, upstreamWebUrl, versionOf } from "../lib/upstream.mjs";
+import { BUILDER_USER, IS_BUILDER, LAUNCHER, MIRROR, ROOT, STATE, T3B_HOME, USE_BUILDER, capture, log, mirrorGit, readJson, sleep, stableNodePath } from "../lib/util.mjs";
+
+// The app never fetches this at runtime (rule server/litellm-rates-off). Each
+// update downloads it once and seeds the app's rate cache, so usage cost
+// estimates keep working. Pinned to a commit, not main: LiteLLM's GitHub
+// accounts were compromised on 2026-10-21 (and once before), and data from an
+// unreviewed branch shouldn't flow into every build. Move the pin by hand.
+const LITELLM_RATES_COMMIT = "b2f0f4d54c5dace1c1f6ad7b3c2f3bc68cb5982b"; // 2026-10-19, before the compromise
+const LITELLM_RATES_URL = `https://raw.githubusercontent.com/BerriAI/litellm/${LITELLM_RATES_COMMIT}/model_prices_and_context_window.json`;
+
+const CURRENT = path.join(STATE, "current.json");
+const PREVIOUS = path.join(STATE, "previous.json");
+const PENDING = path.join(STATE, "pending.json");
+const LOCK = path.join(STATE, "update.lock");
+// The pid of the process holding LOCK, which it writes once it has the lock, for
+// messages. The lock itself is the flock.
+const LOCK_HOLDER = path.join(STATE, "update.lock.pid");
+// The descriptor of LOCK when the run that self-updated handed it to this rerun
+// (rerunHoldingLock); taken out of the environment so nothing this run starts sees it.
+let handedLock = process.env[HANDED_ENV] === String(HANDED_FD) ? HANDED_FD : null;
+delete process.env[HANDED_ENV];
+// Whether this run holds the lock it was handed: it's that rerun, and doesn't self-update again.
+let isRerun = false;
+// An install or rollback in progress: what it moves and the records it writes (lib/platform/app.mjs).
+const ACTIVATION = path.join(STATE, "activation.json");
+const DRIFT_DIR = path.join(STATE, "drift");
+const VERDICTS = path.join(STATE, "verdicts.json");
+/** How many releases back an update looks for one its strict rules still apply to. */
+const MAX_FALLBACK = 5;
+
+const platform = await (async () => {
+  if (process.platform === "darwin") return (await import("../lib/platform/macos.mjs")).default;
+  if (process.platform === "linux") return (await import("../lib/platform/linux.mjs")).default;
+  throw new Error(`unsupported platform: ${process.platform}`);
+})();
+
+// ------------------------------------------------- the upstream half -------
+// As the build account when there is one, otherwise right here.
+
+function requireBuilder() {
+  if (USE_BUILDER && !builderReachable()) {
+    throw new Error(`the build account ${BUILDER_USER} exists but sudo can't switch to it; rerun ./install.sh`);
+  }
+}
+
+async function fetchUpstream() {
+  if (USE_BUILDER) await runAsBuilder(["fetch"]);
+  else fetchUpstreamHere();
+}
+
+/**
+ * What a build brings, for the version stamp's hover card: upstream commits since
+ * the installed build, and t3blackout's own commits since the installed one. A
+ * rebuild of the installed build has neither, so it lists upstream's changes since
+ * the previous release tag and t3blackout's latest few commits instead.
+ */
+function buildChanges(current, sha) {
+  let upstream = { since: null, items: [] };
+  if (current.sha && current.sha !== sha) {
+    upstream = { since: current.version ?? current.sha.slice(0, 10), items: upstreamCommits(current.sha, sha) };
+  } else {
+    const tag = previousTag(sha);
+    if (tag) upstream = { since: tag.replace(/^v/, ""), items: upstreamCommits(tag, sha) };
+  }
+  const head = blackoutCommit();
+  const newSinceInstall = current.blackout && head && current.blackout !== head;
+  const log = spawnSync(
+    "git",
+    ["-C", ROOT, "log", "--no-merges", "--format=%H%x09%s", newSinceInstall ? `${current.blackout}..HEAD` : "--max-count=5"],
+    { encoding: "utf8" },
+  );
+  const origin = spawnSync("git", ["-C", ROOT, "remote", "get-url", "origin"], { encoding: "utf8" });
+  const blackout = {
+    since: newSinceInstall ? (current.version ?? null) : null,
+    items: log.status === 0 ? parseCommitLines(log.stdout).slice(0, 40) : [],
+  };
+  return {
+    upstream: { ...upstream, repo: upstreamWebUrl() },
+    blackout: { ...blackout, repo: origin.status === 0 ? githubWebUrl(origin.stdout) : null },
+  };
+}
+
+/**
+ * Builds `sha`; returns { artifact, skipped, drift }. If the build fails, saves
+ * what it found as a check's report, so it never replaces the report of a build
+ * of the same version that's staged or installed.
+ */
+async function buildUpstream(sha, version, changes, current) {
+  const baselines = { baseline: current.sha ?? null, features: current.baselines ?? {} };
+  let drift = null;
+  try {
+    if (!USE_BUILDER) {
+      const result = await buildArtifact({ sha, version, platform, changes, baseline: baselines.baseline, baselines: baselines.features, onDrift: (found) => (drift = found) });
+      return { ...result, drift };
+    }
+    let result = null;
+    const args = ["build-artifact", "--ref", sha, "--build-version", version, "--changes", JSON.stringify(changes), "--baselines", JSON.stringify(baselines)];
+    await runAsBuilder(args, {
+      onEvent: (event) => {
+        if (event.type === "progress") progress(event.percent);
+        else if (event.type === "drift") drift = event.drift;
+        else if (event.type === "artifact") result = { artifact: event.artifact, skipped: event.skipped ?? [] };
+      },
+    });
+    if (!result?.artifact) throw new Error("the build account finished without an app");
+    return { ...result, drift };
+  } catch (error) {
+    if (drift) saveDriftReport(drift, { check: true });
+    throw error;
+  }
+}
+
+// ------------------------------------------------------------ helpers ------
+
+/** This repo's commit: a build is upstream sha + the rules that stripped it. */
+const blackoutCommit = () => spawnSync("git", ["-C", ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout?.trim() || null;
+
+/**
+ * Writes a drift report where `t3blackout drift` finds it, keeping the last 20
+ * builds' worth. A build's report is <version>.html; a check's,
+ * <version>.check.html, so checking never replaces what a build left out. A
+ * build's also gets <version>.json and its screenshots in <version>/, for
+ * `t3blackout review` and an agent to read.
+ */
+function saveDriftReport(drift, { check = false, looks = null } = {}) {
+  fs.mkdirSync(DRIFT_DIR, { recursive: true });
+  const html = renderDriftReport(drift, looks);
+  const file = path.join(DRIFT_DIR, `${drift.version}${check ? ".check" : ""}.html`);
+  fs.writeFileSync(file, html);
+  fs.copyFileSync(file, path.join(DRIFT_DIR, "latest.html"));
+  if (!check) saveReviewData(drift, looks);
+  const versionOfEntry = (name) => name.replace(/(\.check|\.review)?\.(html|json)$/, "");
+  const versions = [...new Set(fs.readdirSync(DRIFT_DIR).filter((name) => name !== "latest.html").map(versionOfEntry))];
+  const newest = (version) =>
+    Math.max(...fs.readdirSync(DRIFT_DIR).filter((name) => versionOfEntry(name) === version).map((name) => fs.statSync(path.join(DRIFT_DIR, name)).mtimeMs));
+  for (const stale of versions.sort((a, b) => newest(b) - newest(a)).slice(20)) {
+    for (const name of fs.readdirSync(DRIFT_DIR).filter((entry) => versionOfEntry(entry) === stale)) {
+      fs.rmSync(path.join(DRIFT_DIR, name), { recursive: true, force: true });
+    }
+  }
+  log(`what upstream changed: ${file} (t3blackout drift)`);
+}
+
+/** The report's data as <version>.json, screenshots as files beside it in <version>/. */
+function saveReviewData(drift, looks) {
+  const images = path.join(DRIFT_DIR, drift.version);
+  fs.rmSync(images, { recursive: true, force: true });
+  const imageFile = (dataUrl, name) => {
+    const match = /^data:image\/(\w+);base64,(.*)$/s.exec(dataUrl ?? "");
+    if (!match) return null;
+    fs.mkdirSync(images, { recursive: true });
+    const file = path.join(images, `${name}.${match[1] === "jpeg" ? "jpg" : match[1]}`);
+    fs.writeFileSync(file, Buffer.from(match[2], "base64"));
+    return file;
+  };
+  const screens = (looks?.screens ?? []).map((screen) => ({
+    name: screen.name,
+    label: screen.label,
+    features: screen.features,
+    changed: screen.changed,
+    note: screen.note ?? null,
+    before: imageFile(screen.before, `${screen.name}-before`),
+    after: imageFile(screen.after, `${screen.name}-after`),
+    diff: imageFile(screen.diff, `${screen.name}-diff`),
+  }));
+  const data = { ...drift, screens, screensNote: looks?.note ?? null, beforeVersion: looks?.beforeVersion ?? null };
+  fs.writeFileSync(path.join(DRIFT_DIR, `${drift.version}.json`), JSON.stringify(data, null, 2));
+}
+
+const labelsOf = (names) => names.map((name) => featureByName(name)?.label ?? name);
+
+/** Per feature, the upstream commit it last built against: drift reports diff from there. */
+function nextBaselines(current, sha, skipped) {
+  return Object.fromEntries(
+    features.map(({ name }) => [name, skipped.includes(name) ? (current.baselines?.[name] ?? current.sha ?? null) : sha]),
+  );
+}
+
+/** Changes whenever anything under lib/ does, committed or not: a check's verdict is only good for the rules it ran. */
+function rulesDigest() {
+  const hash = createHash("sha256");
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name.startsWith(".")) continue;
+      const full = path.join(dir, entry.name);
+      hash.update(full.slice(ROOT.length));
+      if (entry.isDirectory()) walk(full);
+      else hash.update(fs.readFileSync(full));
+    }
+  };
+  walk(path.join(ROOT, "lib"));
+  return hash.digest("hex").slice(0, 16);
+}
+
+/** Runs the strip rules against `ref` without building: { ok, message, skipped, drift }. */
+async function runCheck(ref, current) {
+  if (!USE_BUILDER) return checkRules(ref, { baseline: current.sha ?? null });
+  let result = null;
+  await runAsBuilder(["check", "--ref", ref, ...(current.sha ? ["--baseline", current.sha] : [])], {
+    onEvent: (event) => {
+      if (event.type === "check") result = event.result;
+    },
+  });
+  if (!result) throw new Error("the build account's check reported nothing");
+  return result;
+}
+
+/**
+ * Whether the rules apply to `sha`, remembered per upstream commit and rules.
+ * Unchecked and `mayCheck` false (no lock, or offline): null.
+ */
+async function verdictFor(ref, sha, current, mayCheck) {
+  const key = `${sha}:${rulesDigest()}`;
+  const verdicts = readJson(VERDICTS, {});
+  if (verdicts[key]) return verdicts[key];
+  if (!mayCheck) return null;
+  const result = await runCheck(ref, current);
+  if (!result.ok && result.drift) saveDriftReport(result.drift, { check: true });
+  const verdict = { ok: result.ok, message: result.message ?? null, skipped: result.skipped ?? [], checkedAt: new Date().toISOString() };
+  const kept = Object.entries(verdicts).slice(-49);
+  fs.writeFileSync(VERDICTS, JSON.stringify(Object.fromEntries([...kept, [key, verdict]]), null, 2));
+  return verdict;
+}
+
+/** pin.json's entry for a channel, or null when the repo has no pin for it. */
+const pinnedFor = (channel) => readPin()?.channels[cliChannel(channel)] ?? null;
+
+/** Refuses a channel pin.json doesn't pin, unless --unpinned (lib/channels.mjs). */
+function requirePinned(opts, channel) {
+  const problem = unpinnedProblem(readPin(), cliChannel(channel), { unpinned: opts.unpinned, soakHours: SOAK_HOURS });
+  if (problem) throw new Error(problem);
+}
+
+/**
+ * target(), but passing over releases a strict rule or a new host would stop,
+ * for the newest older one that still builds; with none, stay put. Returns
+ * { ref, sha, verdict, held: [{ ref, message }] }. An explicit --ref is built as is.
+ */
+async function chooseTarget(opts, current, { mayCheck }) {
+  const newest = target(opts, current);
+  if (opts.ref || newest.sha === current.sha || pinnedFor(opts.channel ?? appChannel())) return { ...newest, verdict: null, held: [] };
+  const tags = soakedTags(opts.channel ?? appChannel(), soakOf(opts));
+  const start = Math.max(0, tags.indexOf(newest.ref));
+  const held = [];
+  for (const [i, ref] of tags.slice(start, start + MAX_FALLBACK).entries()) {
+    const sha = revParse(ref);
+    // Only the newest may be older than what's installed (a deliberate channel switch).
+    if (i > 0 && current.sha && (sha === current.sha || commitTime(sha) <= commitTime(current.sha))) break;
+    const verdict = await verdictFor(ref, sha, current, mayCheck);
+    if (!verdict || verdict.ok) return { ref, sha, verdict, held };
+    held.push({ ref, message: verdict.message ?? "the strict rules don't apply" });
+    log(`passing over ${ref}: ${held.at(-1).message.split("\n")[0]}`);
+  }
+  // Older releases were checked last; the report to read is the newest one's.
+  const newestReport = held.length ? path.join(DRIFT_DIR, `${held[0].ref.replace(/^v/, "")}.check.html`) : null;
+  if (newestReport && fs.existsSync(newestReport)) fs.copyFileSync(newestReport, path.join(DRIFT_DIR, "latest.html"));
+  if (!current.sha) return { ...newest, verdict: null, held };
+  return { ref: current.ref, sha: current.sha, verdict: null, held };
+}
+
+/** One line on releases held back, for logs, notifications and the app. */
+const heldLine = (held, installedRef) => {
+  const reason = held[0].message.split("\n")[0].replace(/\.? ?Nothing was installed\.?$/, "");
+  return `Staying on ${installedRef?.replace(/^v/, "") ?? "the installed build"}; ${held[0].ref.replace(/^v/, "")} needs a rule fix (${reason}). Run t3blackout drift to see why.`;
+};
+
+const channelOfRef = (ref) => (!ref ? null : /-nightly\./.test(ref) ? "nightly" : /-preview\./.test(ref) ? "preview" : "stable");
+
+/**
+ * The update track picked in the app's Settings, resolved the way the app does:
+ * stored only once the user changes it, otherwise derived from the installed version.
+ */
+function appChannel() {
+  const settings = readJson(path.join(T3B_HOME, "userdata", "desktop-settings.json"), {});
+  const configured =
+    settings.updateChannelConfiguredByUser === true ||
+    (settings.updateChannelConfiguredByUser === undefined && settings.updateChannel === "nightly");
+  if (configured && settings.updateChannel) return cliChannel(settings.updateChannel);
+  const installed = channelOfRef(readJson(CURRENT, {}).ref);
+  return !installed || installed === "nightly" ? "nightly" : "stable";
+}
+
+const soakOf = (opts) => (opts["soak-hours"] === undefined ? {} : { soakHours: Number(opts["soak-hours"]) });
+
+/**
+ * The release to be on: the channel's pin. Without one (no pin.json, or
+ * --unpinned on a channel it doesn't pin), the newest soaked one on the
+ * channel, unless that's older than what's installed (e.g. a build newer than
+ * the soak window, or right after turning the soak on), in which case stay put.
+ * Going back is only for a deliberate channel switch.
+ */
+function target(opts, current) {
+  if (opts.ref) return { ref: opts.ref, sha: revParse(opts.ref) };
+  const channel = opts.channel ?? appChannel();
+  // The evaluator's pick is authoritative, up or down, so every machine converges
+  // on the version the hosts it reaches over SSH run.
+  const pinned = pinnedFor(channel);
+  if (pinned) return { ref: pinned.ref, sha: revParse(pinned.sha) };
+  requirePinned(opts, channel);
+  const ref = resolveRef(channel, soakOf(opts));
+  const sha = revParse(ref);
+  const switching = cliChannel(channel) !== channelOfRef(current.ref);
+  if (current.sha && sha !== current.sha && !(opts["allow-downgrade"] && switching) && commitTime(sha) < commitTime(current.sha)) {
+    return { ref: current.ref, sha: current.sha };
+  }
+  return { ref, sha };
+}
+
+function verifyStaged(staged) {
+  log("scanning the packaged app for forbidden endpoints");
+  const hits = scanForbidden(platform.scanRoots(staged), forbiddenInBuild);
+  if (hits.length) throw new Error(`forbidden endpoints found in the app:\n${hits.map((h) => `  - ${h}`).join("\n")}`);
+}
+
+/** Downloads the pricing table and writes it in the cache format UsageService reads. */
+async function seedPricing() {
+  try {
+    const res = await fetch(LITELLM_RATES_URL, { signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const document = await res.json();
+    if (typeof document !== "object" || document === null || Object.keys(document).length < 100) {
+      throw new Error("unexpected pricing table shape");
+    }
+    const target = path.join(T3B_HOME, "userdata", "usage-model-rates.json");
+    const table = JSON.stringify({ fetchedAtMs: Date.now(), document });
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, table);
+    log(`seeded pricing for ${Object.keys(document).length} models`);
+    sharePricing(table);
+  } catch (error) {
+    log(`warning: pricing table not refreshed (${error.message}); cost estimates keep the previous one`);
+  }
+}
+
+/** Agent accounts' servers here can't fetch it either: they copy this one (lib/files/ssh-runner-blackout.sh). */
+function sharePricing(table) {
+  if (!platform.shareWithAccounts) return;
+  try {
+    platform.shareWithAccounts("usage-model-rates.json", table);
+  } catch (error) {
+    log(`warning: pricing table not shared with agent accounts (${error.message})`);
+  }
+}
+
+const isAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+/** Pid of the live process that recorded holding the update lock, if any. */
+function lockHolder() {
+  try {
+    const pid = Number(fs.readFileSync(LOCK_HOLDER, "utf8"));
+    return pid && isAlive(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One update, check or apply at a time: the scheduled job, the app and a manual
+ * run can each start one. An OS lock its holder keeps until it exits
+ * (lib/lock.mjs), so a crashed run never leaves it behind and nobody else can
+ * release it. A rerun the self-updating run started holds the lock it was handed
+ * (rerunHoldingLock). Resolves to an async release(); throws if another run holds it.
+ */
+async function acquireLock() {
+  // The lock file, the records and the log are yours alone (lib/lock.mjs).
+  fs.chmodSync(STATE, 0o700);
+  const handed = handedLock === null ? null : await adoptLock(LOCK, handedLock);
+  handedLock = null;
+  const release = handed ?? (await takeFileLock(LOCK));
+  if (!release) {
+    const holder = lockHolder();
+    throw new Error(`another t3blackout update is running${holder ? ` (pid ${holder})` : ""}`);
+  }
+  isRerun = Boolean(handed);
+  let held = true;
+  const releaseAll = async () => {
+    if (!held) return;
+    held = false;
+    // Before the lock goes: the next holder writes its own pid only once it has it.
+    fs.rmSync(LOCK_HOLDER, { force: true });
+    await release();
+  };
+  // Handing it to a rerun hands over the pid file too: the rerun writes its own and removes it.
+  releaseAll.fd = release.fd;
+  releaseAll.handOff = async () => {
+    held = false;
+    await release.handOff();
+  };
+  try {
+    fs.writeFileSync(LOCK_HOLDER, String(process.pid));
+    recoverInterrupted();
+  } catch (error) {
+    await releaseAll();
+    throw error;
+  }
+  return releaseAll;
+}
+
+/**
+ * Finishes (or undoes) an install or rollback that failed or was cut off partway,
+ * before anything else reads the records or moves the app (lib/platform/app.mjs).
+ * A staged build that never went in stays staged.
+ */
+function recoverInterrupted() {
+  const outcome = recoverActivation({ journal: ACTIVATION, commit: commitRecords, slots: platform.slots, staging: [platform.stagedPath, platform.pendingPath] });
+  if (!outcome) return;
+  log(`${outcome.committed ? "finished" : "undid"} an interrupted ${outcome.op}${outcome.committed && outcome.records.current?.ref ? ` (${outcome.records.current.ref} installed)` : ""}`);
+  const { staged, records } = outcome;
+  if (!outcome.committed && staged && staged !== platform.pendingPath && fs.existsSync(staged) && records.build) keepPending(staged, records.build);
+}
+
+/**
+ * Runs this command again on the code self-update just took, handing it this
+ * run's lock (lib/lock.mjs): the rerun holds and releases it, and it stays held
+ * even if this process is killed while the rerun works.
+ */
+async function rerunHoldingLock(release) {
+  process.exitCode = await runHoldingLock(release, process.execPath, [LAUNCHER, ...process.argv.slice(2)]);
+}
+
+function readPending() {
+  const pending = readJson(PENDING, null);
+  return pending?.sha && fs.existsSync(platform.pendingPath) ? pending : null;
+}
+
+/** Throws unless each of the records an install or rollback writes is a regular file or absent: checked before anything moves. */
+function checkRecords() {
+  for (const file of [CURRENT, PREVIOUS, PENDING]) {
+    let stat = null;
+    try {
+      stat = fs.lstatSync(file);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (stat && !stat.isFile()) throw new Error(`${file} isn't a regular file; remove it and try again`);
+  }
+}
+
+/** Writes an install's or rollback's records (once its build is in place; again, the same, on recovery). */
+function commitRecords({ current, previous, clearPending }) {
+  writeJsonAtomic(PREVIOUS, previous);
+  writeJsonAtomic(CURRENT, current);
+  if (clearPending) {
+    fs.rmSync(PENDING, { force: true });
+    // The staged build if this was it (gone already), or one this build replaces.
+    fs.rmSync(platform.pendingPath, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Swaps `dir` in as the installed app and records it, as one transaction
+ * (lib/platform/app.mjs). An error with `committed` set came after `dir` went
+ * in: it's installed, and the next run finishes the records.
+ */
+function install(dir, build) {
+  const { ref, sha, version, blackout, skipped = [] } = build;
+  const current = readJson(CURRENT, {});
+  const baselines = build.baselines ?? nextBaselines(current, sha, skipped);
+  checkRecords();
+  installBuild({
+    journal: ACTIVATION,
+    slots: platform.slots,
+    staged: dir,
+    records: { current: { ref, sha, version, blackout, skipped, baselines, installedAt: new Date().toISOString() }, previous: current, clearPending: true, build },
+    commit: commitRecords,
+  });
+  try {
+    platform.afterActivate();
+  } catch (error) {
+    log(`warning: ${error.message}`);
+  }
+  log(`installed ${ref} -> ${platform.installedPath}`);
+}
+
+/** Tells the app which build is staged, for it to name when it installs (lib/expect.mjs). */
+const announceStaged = ({ ref, sha, version, blackout }) => emit({ type: "staged", ref, sha, version, blackout });
+
+/** Keeps a verified build until the running app restarts into it. */
+function keepPending(dir, build) {
+  checkRecords();
+  if (dir !== platform.pendingPath) {
+    fs.rmSync(platform.pendingPath, { recursive: true, force: true });
+    fs.renameSync(dir, platform.pendingPath);
+  }
+  writeJsonAtomic(PENDING, { ...build, stagedAt: new Date().toISOString() });
+  log(`${build.ref} is ready; it installs when T3 Blackout restarts`);
+  announceStaged(build);
+}
+
+// --------------------------------------------------------------- commands --
+
+/**
+ * Requests from servers here are served by the run that starts now. Other
+ * accounts write that folder, so a malformed entry is skipped, never followed,
+ * and never stops the update (lib/shared-dir.mjs). Linux has none.
+ */
+function clearUpdateRequests() {
+  if (platform.requestsDir) clearRequests(platform.requestsDir, { log });
+}
+
+async function cmdUpdate(opts) {
+  // Self-update runs under the lock, so a second update's fetch can't swap the
+  // commits it verified; the rerun on the new code is handed this run's lock.
+  const release = await acquireLock();
+  try {
+    // A newer t3blackout (a rule fix pushed from another machine) builds this update.
+    const self = isRerun ? "skipped" : await selfUpdate();
+    if (self === "refused") {
+      platform.notify("T3 Blackout self-update refused", "origin/main has commits self-update won't take (unsigned, or an evaluator pin it can't verify). See state/t3blackout.log.");
+    }
+    if (self === "updated") {
+      await rerunHoldingLock(release);
+      return;
+    }
+    clearUpdateRequests();
+    await update(opts);
+  } finally {
+    await release();
+  }
+}
+
+async function update(opts) {
+  requireBuilder();
+  await fetchUpstream();
+  progress(10);
+  const current = readJson(CURRENT, {});
+  const { ref, sha, held } = await chooseTarget(opts, current, { mayCheck: true });
+  if (held.length && sha === current.sha) {
+    log(heldLine(held, current.ref));
+    if (!opts.json) platform.notify("T3 Blackout update held", heldLine(held, current.ref));
+  }
+  const build = { ref, sha, version: versionOf(ref, sha), blackout: blackoutCommit() };
+  // The app builds the commit its check offered; if the approved release has moved since, nothing.
+  const expected = expectedBuild(opts);
+  if (!isExpectedBuild(build, expected)) {
+    throw new Error(`${unexpectedBuildMessage("the approved release", build, expected)}; check for updates again`);
+  }
+  const pending = readPending();
+  const isBuild = (record) => record?.sha === sha && record.blackout === build.blackout;
+  // The app is never swapped while it runs; it restarts into the new build.
+  const stageOnly = () => opts["stage-only"] || platform.isRunning();
+  if (isBuild(current) && !opts.force) {
+    log(`already on ${ref} (${sha.slice(0, 10)}); nothing to do`);
+    return;
+  }
+  if (isBuild(pending) && !opts.force) {
+    if (stageOnly()) {
+      log(`${ref} is already built and waiting for T3 Blackout to restart`);
+      announceStaged(pending);
+    } else install(platform.pendingPath, pending);
+    progress(100);
+    return;
+  }
+  log(current.sha === sha ? `rebuilding ${ref} with the current strip rules` : `updating to ${ref} (${sha.slice(0, 10)})`);
+  let staged = null;
+  try {
+    const { artifact, skipped, drift } = await buildUpstream(sha, build.version, buildChanges(current, sha), current);
+    build.skipped = skipped;
+    build.baselines = nextBaselines(current, sha, skipped);
+    const leftOut = skipped.length ? ` Left out: ${labelsOf(skipped).join(", ")} (t3blackout drift shows why).` : "";
+    staged = platform.stage(artifact);
+    verifyStaged(staged);
+    // Before/after screenshots against the installed build, for this build's report.
+    const installed = fs.existsSync(platform.installedPath) ? platform.serverOf(platform.installedPath) : null;
+    const looks = await captureLooks({ before: installed, after: platform.serverOf(staged) });
+    saveDriftReport(drift ?? emptyDrift({ version: build.version, sha, repo: upstreamWebUrl() }), {
+      looks: { ...looks, beforeVersion: installed ? (current.version ?? null) : null },
+    });
+    // Screenshots are best effort; what the new packaged server tried while they ran isn't.
+    const egress = packagedEgress(looks);
+    if (egress) throw new Error(egress);
+    progress(95);
+    await seedPricing();
+    if (stageOnly()) {
+      keepPending(staged, build);
+      if (!opts.json) {
+        platform.notify("T3 Blackout update ready", `${build.version} is built. Preview it from the version stamp, then restart T3 Blackout from the update button in its sidebar.${leftOut}`);
+      }
+    } else {
+      try {
+        install(staged, build);
+      } catch (error) {
+        // In place already: the next run finishes the records (lib/platform/app.mjs).
+        if (error.committed) {
+          staged = null;
+          throw new Error(`${build.version} is installed, but: ${error.message}`);
+        }
+        // The swap put the installed build back; keep this verified one staged
+        // for the next run rather than throwing the build away.
+        keepPending(staged, build);
+        staged = null;
+        throw new Error(`${build.version} is built but couldn't be installed (${error.message}); it stays staged and installs on the next update or restart`);
+      }
+      if (!opts.json) platform.notify("T3 Blackout updated", `${build.version} installed.${leftOut}`);
+    }
+    staged = null;
+    progress(100);
+  } catch (error) {
+    log(`update FAILED, keeping the installed build: ${error.message}`);
+    platform.notify("T3 Blackout update failed", String(error.message).split("\n")[0]);
+    emit({ type: "error", message: String(error.message).split("\n")[0] });
+    process.exitCode = 1;
+  } finally {
+    if (staged) fs.rmSync(staged, { recursive: true, force: true });
+  }
+}
+
+/** Takes the update lock if it's free; resolves to its release, or null. */
+async function tryLock() {
+  try {
+    return await acquireLock();
+  } catch {
+    return null;
+  }
+}
+
+/** Release notes, led by what Blackout will leave out of the build or held back. */
+function notesFor(current, sha, version, { verdict, held }) {
+  const notes = releaseNotes(current.sha, sha, version);
+  const lines = [];
+  if (verdict?.skipped?.length) lines.push(`- T3 Blackout leaves out: ${labelsOf(verdict.skipped).join(", ")} (upstream moved their code; the version stamp shows what changed)`);
+  for (const { ref, message } of held) lines.push(`- T3 Blackout skipped ${ref.replace(/^v/, "")}: ${message.split("\n")[0]}`);
+  if (!lines.length) return notes;
+  if (!notes.length) return [{ version, note: lines.join("\n") }];
+  return [{ ...notes[0], note: `${lines.join("\n")}\n${notes[0].note}` }, ...notes.slice(1)];
+}
+
+/**
+ * Reports the release to update to if it isn't installed, or else a built one
+ * waiting for a restart (e.g. rebuilt with new strip rules); one built with
+ * other rules than this checkout's is offered to build again. Checks the user
+ * starts also run the strip rules against releases not checked yet, so the app
+ * never offers one a strict rule would stop, and first take any newer signed
+ * pin.json from origin/main (self-update, as `update` does), so a pin the
+ * evaluator published since the last scheduled run is the one they report.
+ */
+async function cmdPoll(opts) {
+  // A running update is fetching into the mirror; read what it has.
+  const release = opts.offline ? null : await tryLock();
+  try {
+    if (release && !isRerun && (await selfUpdate()) === "updated") {
+      // The new pin may come with new code: poll again with it, under this lock.
+      await rerunHoldingLock(release);
+      return;
+    }
+    if (release) await fetchUpstream();
+    const current = readJson(CURRENT, {});
+    const pending = readPending();
+    const chosen = hasMirror() ? await chooseTarget(opts, current, { mayCheck: Boolean(release) }) : null;
+    // The whole build identity, rules included (lib/expect.mjs): a build staged with other rules is rebuilt.
+    const offer = pollOffer({ current, pending, target: chosen, rules: blackoutCommit() });
+    let available = null;
+    if (offer) {
+      const fromTarget = offer.from === "target";
+      const version = fromTarget ? versionOf(offer.ref, offer.sha) : pending.version;
+      // A staged build knows what it left out, compile errors included; a check only knows anchors.
+      const checked = fromTarget ? chosen.verdict : null;
+      const verdict = offer.staged && pending.skipped ? { ...checked, skipped: pending.skipped } : checked;
+      const notes = notesFor(current, offer.sha, version, { verdict, held: fromTarget ? chosen.held : [] });
+      available = { ref: offer.ref, sha: offer.sha, version, staged: offer.staged, blackout: offer.staged ? pending.blackout : null, releaseNotes: notes };
+    }
+    const heldUp = chosen?.sha === current.sha && chosen.held.length ? heldLine(chosen.held, current.ref) : null;
+    // Only a check the user started says why it's holding; background polls stay quiet.
+    if (!available && heldUp && !opts.offline) throw new Error(heldUp);
+    if (opts.json) emit({ type: "poll", update: available });
+    else if (!available) console.log("up to date");
+    else console.log(`${available.version} available${available.staged ? " (built, installs on restart)" : ""}`);
+  } finally {
+    await release?.();
+  }
+}
+
+const waitFor = async (condition, ms) => {
+  for (const deadline = Date.now() + ms; Date.now() < deadline; await sleep(250)) {
+    if (condition()) return true;
+  }
+  return condition();
+};
+
+/**
+ * Installs the staged build if there is one and the app isn't running.
+ * `expected` (lib/expect.mjs): the build the app announced; checked under the
+ * lock, so a different one staged meanwhile stays staged instead.
+ */
+async function applyPending(expected = null) {
+  if (!readPending()) return;
+  const release = await acquireLock();
+  try {
+    const pending = readPending();
+    if (pending && !isExpectedBuild(pending, expected)) {
+      throw new Error(`${unexpectedBuildMessage("the staged build", pending, expected)}; check for updates, then restart again`);
+    }
+    const stale = pending && staleRulesProblem(pending, blackoutCommit());
+    if (stale) throw new Error(stale);
+    if (pending) install(platform.pendingPath, pending);
+  } finally {
+    await release();
+  }
+}
+
+/** Run by the app's "restart to update": wait for it to quit, swap, relaunch. */
+async function cmdApply(opts) {
+  try {
+    const pid = Number(opts["wait-pid"]);
+    if (pid && !(await waitFor(() => !isAlive(pid), 60_000))) throw new Error(`T3 Blackout (pid ${pid}) didn't quit`);
+    if (!(await waitFor(() => !platform.isRunning(), 15_000))) throw new Error("T3 Blackout is still running");
+    await applyPending(expectedBuild(opts));
+  } catch (error) {
+    log(`update not applied: ${error.message}; the new build stays staged`);
+    platform.notify("T3 Blackout update not applied", error.message);
+    process.exitCode = 1;
+  }
+  // Relaunch either way: the user asked for a restart.
+  platform.launch();
+}
+
+async function cmdLaunch() {
+  if (!platform.isRunning()) {
+    try {
+      await applyPending();
+    } catch (error) {
+      // Launch the installed build anyway; the staged one stays for `update`.
+      log(`staged build not installed: ${error.message}`);
+    }
+  }
+  platform.launch();
+}
+
+/**
+ * Applies the strip rules to the release this machine would build (or --ref)
+ * without installing anything. --build builds it too: typecheck, package,
+ * forbidden-endpoint scan and smoke test, the app left unsigned in the build
+ * output. CI runs it on the pinned commit whenever the rules or build code change.
+ */
+async function cmdCheck(opts) {
+  const release = await acquireLock();
+  try {
+    requireBuilder();
+    await fetchUpstream();
+    const current = readJson(CURRENT, {});
+    const ref = opts.ref ?? target(opts, current).sha;
+    if (opts.build) {
+      const sha = revParse(ref);
+      const { skipped } = await buildUpstream(sha, versionOf(ref, sha), null, current);
+      console.log(`built ${ref}${skipped.length ? `, leaving out: ${labelsOf(skipped).join(", ")}` : ""}`);
+      return;
+    }
+    const result = await runCheck(ref, current);
+    if (result.drift) saveDriftReport(result.drift, { check: true });
+    if (result.ok && result.skipped.length) console.log(`would leave out: ${labelsOf(result.skipped).join(", ")}`);
+    if (!result.ok) process.exitCode = 1;
+  } catch (error) {
+    log(error.message);
+    process.exitCode = 1;
+  } finally {
+    await release();
+  }
+}
+
+/** A file at an upstream commit, from the mirror (its owner only: lib/util.mjs mirrorGit); null when it doesn't exist there. */
+function showUpstream(sha, file) {
+  const result = mirrorGit(["show", `${sha}:${file}`], { fetch: true });
+  return result.status === 0 ? result.stdout : null;
+}
+
+/** The evaluator's view of the mirror, the build and the network (lib/evaluate.mjs, lib/pincheck.mjs). */
+const evaluatorIo = () => ({
+  ...networkIo({ isKnownHost }),
+  show: showUpstream,
+  revParse,
+  tags: mirrorTags,
+  knownDeviceTools,
+  // Device tool approvals and the lockfiles kept for them are the candidate's
+  // own: each call replaces the last one's.
+  checkRules: (ref, sha, { baseline, approvals, locks = {} }) => {
+    allowDeviceTools(approvals, locks);
+    return checkRules(sha, { baseline });
+  },
+  resolveLock: () => resolveLockfile(),
+  build: (ref, sha, { baseline, approvals, locks = {} }) => {
+    allowDeviceTools(approvals, locks);
+    return buildArtifact({ sha, version: versionOf(ref, sha), platform, changes: null, baseline });
+  },
+  log,
+});
+
+/** Reads DIR/<sha><suffix>, a file the evaluate job left for that commit; null when there's none. */
+const evaluationFile = (dir, suffix) => (sha) => {
+  if (!dir || !/^[0-9a-f]{40}$/.test(sha)) return null;
+  const file = path.join(dir, `${sha}${suffix}`);
+  return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null;
+};
+
+/** DIR/<sha>.yaml: a lockfile the evaluate job resolved. */
+const resolvedLockIn = (dir) => evaluationFile(dir, ".yaml");
+
+/** DIR/<sha>.stage.json: the stage record (lib/inventory.mjs) of a build the evaluate job made. */
+const stageRecordIn = (dir) => evaluationFile(dir, ".stage.json");
+
+/**
+ * What an evaluation keeps (lib/evaluate.mjs io.save), written into DIR the
+ * moment it has it, so a run that fails or times out later still hands it on:
+ * DIR/<sha>.yaml (a resolved lockfile), DIR/<sha>.stage.json (a stage record).
+ */
+const saveEvaluationIn = (dir) => {
+  if (!dir) return undefined;
+  fs.mkdirSync(dir, { recursive: true });
+  return (kind, sha, value) => {
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`not keeping a ${kind} for ${sha}, which isn't a commit`);
+    const [suffix, text] = kind === "stage" ? [".stage.json", `${JSON.stringify(value)}\n`] : [".yaml", value];
+    writeFileAtomic(path.join(dir, `${sha}${suffix}`), text, { mode: 0o644 });
+  };
+};
+
+/**
+ * CI (.github/workflows/evaluate.yml), the evaluate job: picks the newest release
+ * on a channel that passes every gate (lib/evaluate.mjs). --write updates
+ * pin.json; --report writes a Markdown summary either way; --resolved DIR gets
+ * the lockfiles it resolved and the stage records of what it built, as it goes
+ * (saveEvaluationIn), for the commit and alert jobs. --stage-from DIR: the last
+ * evaluation's --resolved, whose stage record of the pinned release is reused
+ * when it still checks out, instead of building that release again.
+ * Exit 0: pinned or already current. Exit 3: every candidate was held.
+ */
+async function cmdEvaluate(opts) {
+  const channel = cliChannel(opts.channel ?? "nightly");
+  let result;
+  try {
+    fetchUpstreamHere();
+    result = await evaluateChannel(
+      { channel, pin: readPin() ?? emptyPin(), ref: opts.ref ?? null, baseline: opts.baseline ?? null, build: opts.build },
+      { ...evaluatorIo(), carriedStage: stageRecordIn(opts["stage-from"]), save: saveEvaluationIn(opts.resolved) },
+    );
+  } catch (error) {
+    // The alert job prints the report of a failed evaluation; it should say why.
+    if (opts.report) fs.writeFileSync(opts.report, `# Upstream evaluation: ${channel}\n\nThe evaluation failed: ${error.message}\n`);
+    throw error;
+  }
+  if (opts.write && result.pin) writePin(result.pin);
+  if (opts.report) fs.writeFileSync(opts.report, `${result.report}\n`);
+  console.log(result.report);
+  process.exitCode = result.exitCode;
+}
+
+/**
+ * CI. With --candidate, the commit job: re-derives every gate it can without
+ * running upstream code before the evaluator's pin is signed (lib/pincheck.mjs),
+ * writes the candidate over pin.json when it changed, and "changed" or
+ * "unchanged" to --result. Alone: checks that every tag pin.json names still
+ * points at its commit upstream. Exit 1 on any failure.
+ */
+async function cmdPinCheck(opts) {
+  const current = readPin();
+  if (!opts.candidate) {
+    if (!current) throw new Error("there's no pin.json to check");
+    const moved = unreleasedPin(null, current);
+    if (moved) throw new Error(`pin.json ${moved}`);
+    console.log("every pinned tag names its commit upstream");
+    return;
+  }
+  if (!opts.channel) throw new Error("pass --channel <the channel the evaluate job evaluated>");
+  fetchUpstreamHere();
+  const io = {
+    ...evaluatorIo(),
+    unreleasedPin,
+    resolvedLock: resolvedLockIn(opts.resolved),
+  };
+  const candidate = JSON.parse(fs.readFileSync(opts.candidate, "utf8"));
+  const verdict = await verifyCandidate({ current, candidate, channel: cliChannel(opts.channel) }, io);
+  if (verdict === "changed") writePin(candidate);
+  if (opts.result) fs.writeFileSync(opts.result, `${verdict}\n`);
+  console.log(`pin ${verdict}`);
+}
+
+/**
+ * For a device tool version you reviewed by hand (lib/known-device-tools.txt):
+ * proposes its dependency lockfile as npm resolves it as of the tool's publish
+ * time, checks it (registry bytes, minimum age) and reviews what's new since the
+ * previous version's kept lockfile, then keeps it in pin.json's deviceToolLocks,
+ * which builds install from. Commit pin.json, signed. A kept lockfile never changes.
+ */
+async function cmdDeviceToolLock(opts) {
+  const tool = opts.tool;
+  const pin = readPin();
+  if (!tool || !pin) throw new Error("pass --tool name@version, a device tool version listed in lib/known-device-tools.txt, in a clone with pin.json");
+  const reviewed = [...knownDeviceTools(), ...pin.deviceTools];
+  if (!reviewed.includes(tool)) throw new Error(`${tool} isn't reviewed yet: read it and list it in lib/known-device-tools.txt first`);
+  if (pin.deviceToolLocks?.[tool]) throw new Error(`pin.json already keeps ${tool}'s dependency lockfile`);
+  const previous = await latestReviewed(splitPin(tool).name, reviewed.filter((other) => other !== tool));
+  const review = await reviewToolClosure(tool, previous, { isKnownHost, previousLock: (previous && pin.deviceToolLocks?.[previous]) || null });
+  for (const note of review.notes) log(note);
+  if (!review.ok) throw new Error(`${tool}'s dependency closure doesn't pass review:\n${review.reasons.map((reason) => `  - ${reason}`).join("\n")}`);
+  writePin({ ...pin, deviceToolLocks: { ...(pin.deviceToolLocks ?? {}), [tool]: review.lock } });
+  log(`pin.json keeps ${tool}'s dependency lockfile now (sha256 ${review.lock.sha256}); commit it, signed`);
+}
+
+/**
+ * CI, the alert job: advisories against the pin on main for --channel (after the
+ * commit job, so a pin that wasn't published is never reported as fixed), on
+ * everything a build of it installs: the lockfile the evaluate job resolved for
+ * it and its staged production install (--resolved, checked against upstream
+ * and npm; missing when the evaluation failed), and each device tool's frozen
+ * closure (pin.json). What it couldn't check is listed as a gap. JSON to --out,
+ * for .github/scripts/security-issues.mjs.
+ */
+async function cmdAdvisories(opts) {
+  if (!opts.out) throw new Error("pass --out <file>");
+  fetchUpstreamHere();
+  const report = await advisoryReport(
+    { pin: readPin(), channel: cliChannel(opts.channel ?? "nightly") },
+    {
+      show: showUpstream,
+      resolvedLock: resolvedLockIn(opts.resolved),
+      stageRecord: stageRecordIn(opts.resolved),
+      toolPackages: toolClosurePackages,
+      npmMeta,
+      openAdvisories,
+      log,
+    },
+  );
+  fs.writeFileSync(opts.out, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(`${report.open.length} advisories open against ${report.release}, in ${report.packages} packages${report.gaps.length ? `; not covered: ${report.gaps.join("; ")}` : ""}`);
+}
+
+/**
+ * CI, the alert job: upstream's release tags on --channel newer than main's pin,
+ * read from upstream itself, not from the evaluate job. JSON to --out, for
+ * .github/scripts/security-issues.mjs: the held issue closes when there are none
+ * or a pin was actually published, never on the evaluate job's exit code.
+ */
+function cmdReleases(opts) {
+  const channel = cliChannel(opts.channel ?? "nightly");
+  const pinned = readPin()?.channels[channel]?.ref ?? null;
+  fetchUpstreamHere();
+  const newer = newerReleases(mirrorTags(), channel, pinned);
+  if (opts.out) fs.writeFileSync(opts.out, `${JSON.stringify({ channel, pinned, newer }, null, 2)}\n`);
+  console.log(newer.length ? `${newer.length} ${channel} release(s) newer than ${pinned ?? "no pin"}: ${newer.join(", ")}` : `${pinned} is the newest ${channel} release`);
+}
+
+/** Opens the latest drift report: what upstream changed under the features a build left out. */
+function cmdDrift() {
+  const latest = path.join(DRIFT_DIR, "latest.html");
+  if (!fs.existsSync(latest)) {
+    console.log("no drift report yet: every build so far had every feature");
+    return;
+  }
+  console.log(latest);
+  spawnSync(process.platform === "darwin" ? "open" : "xdg-open", [latest], { stdio: "ignore" });
+}
+
+/** Opens the staged build (or with --installed, the installed one) in a sandboxed window, on a copy of your profile. */
+async function cmdPreview(opts) {
+  const pending = opts.installed ? null : readPending();
+  if (!pending && !opts.installed) throw new Error("no update is staged; `t3blackout preview --installed` opens the installed build");
+  const appPath = pending ? platform.pendingPath : platform.installedPath;
+  const app = fs.existsSync(appPath) ? platform.serverOf(appPath) : null;
+  if (!app) throw new Error(`no app at ${appPath}`);
+  const version = pending?.version ?? readJson(CURRENT, {}).version ?? "the installed build";
+  const stop = new AbortController();
+  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => stop.abort());
+  await preview({ app, version, userdata: path.join(T3B_HOME, "userdata"), sandbox: platform.sandbox, signal: stop.signal });
+}
+
+// Where a commit's files are, for telling what's visible in the desktop app.
+const AREAS = [
+  ["tests", /(^|\/)(__tests__|test|tests|e2e)\/|\.(test|spec|browser\.test)\.[cm]?[jt]sx?$/],
+  ["mobile", /^apps\/mobile\//],
+  ["build", /^(\.github|scripts|patches|infra|oxlint-plugin-[^/]+)\/|^[^/]+$/],
+  ["marketing", /^apps\/marketing\//],
+  ["docs", /\.mdx?$|^docs\//],
+  ["web", /^apps\/web\//],
+  ["desktop", /^apps\/desktop\//],
+  ["server", /^apps\/server\//],
+  ["shared", /^packages\//],
+];
+const areaOf = (file) => AREAS.find(([, pattern]) => pattern.test(file))?.[0] ?? "other";
+
+/**
+ * Gathers what an agent needs to review a build: the
+ * report's data, every upstream commit since the build before it with the areas
+ * it touches, and where to change rules. Writes state/drift/<version>.review.json
+ * and prints its path. The staged build against the installed one, or with
+ * --installed the installed one against the build it replaced.
+ */
+function cmdReview(opts) {
+  const current = readJson(CURRENT, {});
+  const pending = opts.installed ? null : readPending();
+  const [build, base] = pending ? [pending, current] : [current, readJson(PREVIOUS, {})];
+  if (!build.sha) throw new Error("nothing is installed or staged to review");
+  const commits = base.sha
+    ? commitDetails(base.sha, build.sha).map((commit) => {
+        const areas = [...new Set(commit.files.map(areaOf))];
+        // Visible in the desktop app only if it touches app code outside tests.
+        return { ...commit, areas, visible: areas.some((area) => ["web", "desktop", "server", "shared"].includes(area)) };
+      })
+    : [];
+  // Blackout's own changes in between: they explain screenshot differences upstream didn't make.
+  const ownLog =
+    base.blackout && build.blackout && base.blackout !== build.blackout
+      ? spawnSync("git", ["-C", ROOT, "log", "--no-merges", "--format=%H%x09%s", `${base.blackout}..${build.blackout}`], { encoding: "utf8" })
+      : null;
+  const data = path.join(DRIFT_DIR, `${build.version}.json`);
+  const html = path.join(DRIFT_DIR, `${build.version}.html`);
+  const review = {
+    build: { version: build.version, ref: build.ref, sha: build.sha, staged: Boolean(pending), leftOut: build.skipped ?? [] },
+    base: base.sha ? { version: base.version, sha: base.sha } : null,
+    upstream: upstreamWebUrl(),
+    // A bare clone of upstream: `git -C <mirror> show <sha>` reads a commit without the network.
+    mirror: MIRROR,
+    report: { html: fs.existsSync(html) ? html : null, data: fs.existsSync(data) ? data : null },
+    preview: pending ? `${CLI_SHIM} preview` : null,
+    blackout: { repo: ROOT, rules: path.join(ROOT, "lib", "rules.mjs"), features: path.join(ROOT, "lib", "features.mjs"), cli: CLI_SHIM },
+    counts: { commits: commits.length, visible: commits.filter((commit) => commit.visible).length },
+    commits,
+    blackoutCommits: ownLog?.status === 0 ? parseCommitLines(ownLog.stdout) : [],
+  };
+  fs.mkdirSync(DRIFT_DIR, { recursive: true });
+  const file = path.join(DRIFT_DIR, `${build.version}.review.json`);
+  fs.writeFileSync(file, JSON.stringify(review, null, 2));
+  console.log(file);
+  console.log(
+    `${build.version}${pending ? " (staged)" : ""} against ${base.version ?? "nothing"}: ${review.counts.commits} upstream commits, ` +
+      `${review.counts.visible} touching app code; left out: ${build.skipped?.length ? labelsOf(build.skipped).join(", ") : "nothing"}`,
+  );
+}
+
+// `~/.t3blackout/bin/t3blackout`: this clone's CLI at a path skills can name.
+const CLI_SHIM = path.join(T3B_HOME, "bin", "t3blackout");
+
+/** Whether `a` and `b` are one directory entry: the same name in the same folder, however each is spelled. */
+function sameEntry(a, b) {
+  try {
+    const [left, right] = [fs.statSync(path.dirname(a)), fs.statSync(path.dirname(b))];
+    return left.dev === right.dev && left.ino === right.ino && path.basename(a) === path.basename(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Written only once the locations are checked (lib/load-install-config.mjs),
+ * never over this CLI, and replaced whole: a rename, so a symlink or hard link
+ * at CLI_SHIM is replaced rather than written through.
+ */
+function writeCliShim() {
+  if (sameEntry(CLI_SHIM, LAUNCHER)) return;
+  const script = cliShim({ node: stableNodePath(), launcher: LAUNCHER });
+  try {
+    if (fs.existsSync(CLI_SHIM) && fs.readFileSync(CLI_SHIM, "utf8") === script) return;
+    fs.mkdirSync(path.dirname(CLI_SHIM), { recursive: true });
+    writeFileAtomic(CLI_SHIM, script, { mode: 0o755 });
+  } catch {}
+}
+
+async function cmdSmoke() {
+  requireBuilder();
+  if (USE_BUILDER) await runAsBuilder(["smoke"]);
+  else await smokeTest();
+}
+
+function cmdStatus() {
+  const current = readJson(CURRENT, null);
+  const pending = readPending();
+  const builds = USE_BUILDER
+    ? `as ${BUILDER_USER}${builderReachable() ? "" : " (sudo can't switch to it; rerun ./install.sh)"}`
+    : "as you (./install.sh sets up a separate build account)";
+  console.log(`installed: ${current?.sha ? `${current.ref} (${current.sha.slice(0, 10)}) at ${current.installedAt}` : "none"}`);
+  if (current?.skipped?.length) console.log(`left out:  ${labelsOf(current.skipped).join(", ")} (t3blackout drift)`);
+  if (pending) console.log(`staged:    ${pending.ref} (${pending.sha.slice(0, 10)}), installs when the app restarts`);
+  console.log(`channel:   ${channelPolicy(readPin(), appChannel(), { soakHours: SOAK_HOURS, minAgeDays: MIN_AGE_DAYS })}`);
+  console.log(`app:       ${fs.existsSync(platform.installedPath) ? platform.installedPath : "missing"}`);
+  const schedule = readJson(SCHEDULE, null);
+  const scheduled = platform.isScheduled();
+  const runs = scheduled === "LaunchDaemon" ? " (LaunchDaemon: runs with nobody logged in)" : scheduled === "LaunchAgent" ? " (LaunchAgent: while you're logged in)" : "";
+  console.log(`schedule:  ${scheduled ? `${schedule ? describeSchedule(schedule) : "daily"}${runs}` : "off"}`);
+  console.log(`role:      ${installConfig?.role ?? "ui"}${installConfig ? "" : " (no state/install.json; ./install.sh saves it)"}`);
+  if (fs.existsSync(ACTIVATION)) console.log("interrupted: an install or rollback didn't finish; the next update or rollback finishes it");
+  console.log(`builds:    ${builds}`);
+  console.log(`self-update: ${fs.existsSync(path.join(ROOT, ".allowed_signers")) ? "signed commits from origin/main" : "off (no .allowed_signers)"}`);
+  for (const line of platform.statusLines()) console.log(line);
+}
+
+/** Swaps the previous build back in, under the update lock, as one transaction with its records (lib/platform/app.mjs). */
+async function cmdRollback() {
+  const release = await acquireLock();
+  try {
+    const current = readJson(CURRENT, {});
+    const previous = readJson(PREVIOUS, {});
+    checkRecords();
+    rollBackBuild({ journal: ACTIVATION, slots: platform.slots, records: { current: previous, previous: current, clearPending: false }, commit: commitRecords });
+    log(`rolled back to ${previous.ref ?? "previous build"}`);
+  } finally {
+    await release();
+  }
+}
+
+const SCHEDULE = path.join(STATE, "schedule.json");
+
+/** "Mondays at 4:00" or "daily at 4:00", for status and logs. */
+const describeSchedule = ({ hour, weekday }) =>
+  weekday === "hourly"
+    ? "hourly, and on update requests"
+    : `${weekday === null ? "daily" : `${WEEKDAYS[weekday][0].toUpperCase()}${WEEKDAYS[weekday].slice(1)}s`} at ${hour}:00`;
+
+/**
+ * Hourly by default: with pin.json, a run builds only when the pin moved, so
+ * security fixes the evaluator pins reach this machine within the hour (a daily
+ * or weekly schedule is there to choose instead). The install's role picks how
+ * it runs: the host role's job needs no login (lib/platform/macos.mjs).
+ */
+function cmdSchedule(opts) {
+  const { hour, weekday } = parseSchedule(opts);
+  platform.schedule(hour, weekday, { role: installConfig?.role ?? "ui" });
+  fs.writeFileSync(SCHEDULE, JSON.stringify({ hour, weekday }));
+  log(`update scheduled ${describeSchedule({ hour, weekday })}`);
+}
+
+function cmdUnschedule() {
+  platform.unschedule();
+  fs.rmSync(SCHEDULE, { force: true });
+  log("scheduled update removed");
+}
+
+/**
+ * Saves the install's role (--role ui|host|both, else the saved one) and the
+ * locations this run's environment chose, for every later run
+ * (lib/install-config.mjs). install.sh runs it before anything else. It leaves
+ * the scheduled job alone: `schedule` picks LaunchAgent or LaunchDaemon from the
+ * saved role, so changing the role takes both (install.sh runs both).
+ */
+function cmdConfigure(opts) {
+  const role = opts.role ?? installConfig?.role;
+  if (process.platform === "darwin" && (role === "host" || role === "both")) {
+    try {
+      fs.accessSync("/Applications", fs.constants.W_OK);
+    } catch {
+      throw new Error(`--role ${role} installs the app in /Applications, where agent accounts find it; run ./install.sh from an admin account`);
+    }
+  }
+  const config = saveInstallConfig({ role: opts.role });
+  const set = Object.entries(config.env).filter(([, value]) => value !== null);
+  log(`install config saved: role ${config.role}${set.length ? `, ${set.map(([key, value]) => `${key}=${value}`).join(", ")}` : ""}`);
+}
+
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: {
+    ref: { type: "string" },
+    channel: { type: "string" },
+    force: { type: "boolean", default: false },
+    "stage-only": { type: "boolean", default: false },
+    "expect-sha": { type: "string" },
+    "expect-blackout": { type: "string" },
+    offline: { type: "boolean", default: false },
+    "allow-downgrade": { type: "boolean", default: false },
+    "soak-hours": { type: "string" },
+    "wait-pid": { type: "string" },
+    "build-version": { type: "string" },
+    changes: { type: "string" },
+    baseline: { type: "string" },
+    baselines: { type: "string" },
+    json: { type: "boolean", default: false },
+    hour: { type: "string" },
+    day: { type: "string" },
+    role: { type: "string" },
+    vault: { type: "string" },
+    installed: { type: "boolean", default: false },
+    build: { type: "boolean", default: false },
+    write: { type: "boolean", default: false },
+    report: { type: "string" },
+    resolved: { type: "string" },
+    "stage-from": { type: "string" },
+    result: { type: "string" },
+    out: { type: "string" },
+    unpinned: { type: "boolean", default: false },
+    candidate: { type: "string" },
+    tool: { type: "string" },
+  },
+});
+
+// What the build account runs, through lib/builder.mjs.
+const builderCommands = {
+  fetch: () => fetchUpstreamHere(),
+  "build-artifact": async (opts) => {
+    const changes = opts.changes ? JSON.parse(opts.changes) : null;
+    const baselines = opts.baselines ? JSON.parse(opts.baselines) : {};
+    const { artifact, skipped } = await buildArtifact({
+      sha: opts.ref,
+      version: opts["build-version"],
+      platform,
+      changes,
+      baseline: baselines.baseline ?? null,
+      baselines: baselines.features ?? {},
+      onDrift: (drift) => emit({ type: "drift", drift }),
+    });
+    emit({ type: "artifact", artifact, skipped });
+  },
+  check: (opts) => emit({ type: "check", result: checkRules(opts.ref, { baseline: opts.baseline ?? null }) }),
+  smoke: () => smokeTest(),
+};
+
+const commands = IS_BUILDER
+  ? builderCommands
+  : {
+      update: cmdUpdate,
+      check: cmdCheck,
+      drift: cmdDrift,
+      preview: cmdPreview,
+      review: cmdReview,
+      poll: cmdPoll,
+      apply: cmdApply,
+      smoke: cmdSmoke,
+      launch: cmdLaunch,
+      status: cmdStatus,
+      rollback: cmdRollback,
+      schedule: cmdSchedule,
+      unschedule: cmdUnschedule,
+      configure: cmdConfigure,
+      signing: (opts) => platform.commands.signing(opts, positionals[1]),
+      evaluate: cmdEvaluate,
+      "pin-check": cmdPinCheck,
+      "device-tool-lock": cmdDeviceToolLock,
+      advisories: cmdAdvisories,
+      releases: cmdReleases,
+    };
+
+const command = commands[positionals[0] ?? "status"];
+if (!command) {
+  console.error(`unknown command: ${positionals[0]}\ncommands: ${Object.keys(commands).join(", ")}`);
+  process.exit(2);
+}
+enableEvents(values.json);
+// A saved config that's there but invalid, or a location that can't be used:
+// only `configure` may run, to replace it or say why (lib/load-install-config.mjs).
+if (installConfigError && command !== cmdConfigure) {
+  log(`error: ${installConfigError.message}`);
+  emit({ type: "error", message: installConfigError.message });
+  process.exit(1);
+}
+if (!IS_BUILDER && !installConfigError) writeCliShim();
+try {
+  await command(values);
+} catch (error) {
+  log(`error: ${error.message}`);
+  emit({ type: "error", message: String(error.message).split("\n")[0] });
+  process.exit(1);
+}

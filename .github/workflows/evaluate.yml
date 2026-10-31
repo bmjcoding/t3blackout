@@ -1,0 +1,229 @@
+# Picks the newest upstream release that passes every gate (bin/t3blackout
+# evaluate), pins it in pin.json with the evaluator's key, and turns advisories
+# against the pin on main into issues. Hourly, so a security fix upstream ships
+# lands within the hour (the fast lane, lib/fastlane.mjs).
+#
+# Three jobs, because the evaluate job builds and runs untrusted upstream code
+# and its dependencies (Oct 2026: SubQuery's payload read CI runner memory):
+#   evaluate  read-only token, no secrets; its pin.json, report, resolved
+#             lockfiles and stage records (the staged production install of
+#             each release it built, lib/inventory.mjs) are artifacts, and only
+#             ever a proposal
+#   commit    fresh runner that runs no upstream or npm code: re-derives every gate
+#             it can from git, npm and OSV (bin/t3blackout pin-check,
+#             lib/pincheck.mjs), then signs and pushes the pin
+#   alerts    after commit: advisories against the pin actually on main
+#             (bin/t3blackout advisories), then issues only. It runs when the
+#             evaluate job failed or timed out too: what that job didn't leave is
+#             a coverage gap, and upstream's lockfile stands in for it. The held
+#             issue closes only on a pin the commit job pushed, or when upstream
+#             (read here, bin/t3blackout releases) has nothing newer than main's pin.
+# All of this is advisory. Every machine's self-update accepts the evaluator's
+# key only for pin.json-only commits that move no channel backward
+# (lib/selfupdate.mjs), and then re-checks the pin itself before installing it,
+# from git, npm and this repo: a forged result or a stolen evaluator key can at
+# worst hold an update or make it fail, never install unchecked code.
+#
+# Only nightly is evaluated. Another channel needs a first pin in a commit you
+# sign (bin/t3blackout evaluate --channel stable --baseline <tag> --write, run
+# locally); until then every machine refuses it (lib/channels.mjs).
+
+name: Evaluate upstream
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: evaluate
+  cancel-in-progress: false
+
+env:
+  CHANNEL: nightly
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read # the last evaluation's artifact
+    outputs:
+      exit: ${{ steps.evaluate.outputs.exit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Upstream's packageManager field picks the pnpm version for each release.
+      - run: corepack enable
+
+      # Upstream's Linux packager checks for these first (scripts/
+      # build-desktop-artifact.ts LINUX_DESKTOP_BUILD_PREREQUISITES); the runner
+      # image has Rust, a C toolchain and pkg-config but not these two.
+      - name: Linux packaging prerequisites
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends libsecret-1-dev imagemagick
+
+      # Each step has its own limit, under the job's, so a stuck one fails the
+      # job instead of cancelling it: the upload and the alerts job still run.
+      - name: Repo tests
+        timeout-minutes: 15
+        run: node --test test/*.test.mjs
+
+      # The pinned release's stage record from the last evaluation, so it isn't
+      # rebuilt every hour: used only if it's for that commit, this build code
+      # and this platform, and its lockfile checks out (lib/inventory.mjs);
+      # otherwise the evaluation builds the pinned release.
+      - name: The last evaluation's stage records
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/previous"
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow evaluate.yml --branch main --status completed \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty') || run=""
+          if [ -n "$run" ]; then
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --name evaluation --dir "$RUNNER_TEMP/previous" ||
+              echo "run $run left no evaluation artifact"
+          fi
+
+      # Lockfiles and stage records are written as they're made, so a failed or
+      # timed-out evaluation still uploads what it had.
+      - name: Evaluate
+        id: evaluate
+        timeout-minutes: 90
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/out"
+          node bin/t3blackout evaluate --channel "$CHANNEL" --build --write --stage-from "$RUNNER_TEMP/previous/resolved" \
+            --report "$RUNNER_TEMP/out/report.md" --resolved "$RUNNER_TEMP/out/resolved"
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          cp pin.json "$RUNNER_TEMP/out/pin.json" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evaluation
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+
+  commit:
+    needs: evaluate
+    if: needs.evaluate.outputs.exit == '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      # The ref it signed and pushed; empty when it pushed nothing.
+      published: ${{ steps.push.outputs.published }}
+    steps:
+      # No credentials in .git/config: the push below passes the token itself.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evaluation
+          path: ${{ runner.temp }}/evaluation
+
+      # No upstream or npm code runs here, and no secret is in reach: pin-check
+      # reads upstream with git, npm and OSV over HTTPS and applies the strip
+      # rules to upstream's source as text. It writes pin.json when it passes.
+      - name: Re-derive the gates
+        id: check
+        run: |
+          node bin/t3blackout pin-check --channel "$CHANNEL" --candidate "$RUNNER_TEMP/evaluation/pin.json" \
+            --resolved "$RUNNER_TEMP/evaluation/resolved" --result "$RUNNER_TEMP/verdict"
+          echo "verdict=$(cat "$RUNNER_TEMP/verdict")" >> "$GITHUB_OUTPUT"
+
+      - name: Sign and push the pin
+        id: push
+        if: steps.check.outputs.verdict == 'changed'
+        env:
+          SIGNING_KEY: ${{ secrets.T3BLACKOUT_EVALUATOR_SIGNING_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          key="$RUNNER_TEMP/evaluator_key"
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
+          ref=$(node -p "require('./pin.json').channels[process.env.CHANNEL].ref")
+          git -c core.hooksPath=/dev/null -c gpg.format=ssh -c gpg.ssh.program=ssh-keygen -c user.signingkey="$key" \
+            -c user.name="t3blackout evaluator" -c user.email="t3blackout-evaluator@users.noreply.github.com" \
+            commit -S -m "Pin $CHANNEL to $ref" -- pin.json
+          rm -f "$key"
+          # The token goes to git through its environment, not its command line.
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" \
+            git -c core.hooksPath=/dev/null push origin HEAD:main
+          echo "published=$ref" >> "$GITHUB_OUTPUT"
+
+  alerts:
+    needs: [evaluate, commit]
+    if: always() && needs.evaluate.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # main as it is now, after the commit job: the pin every machine builds.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Whatever the evaluate job left, if anything: without it the advisory
+      # check still runs and says what it couldn't cover.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: evaluation
+          path: ${{ runner.temp }}/evaluation
+
+      - name: Security advisories
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          node bin/t3blackout advisories --channel "$CHANNEL" --resolved "$RUNNER_TEMP/evaluation/resolved" --out "$RUNNER_TEMP/advisories.json"
+          node .github/scripts/security-issues.mjs advisories "$RUNNER_TEMP/advisories.json"
+
+      # EXIT and the report come from the job that ran upstream code: they can
+      # open the held issue, never close it. Closing takes PUBLISHED (what the
+      # commit job pushed) or upstream's own tags (bin/t3blackout releases).
+      - name: Held releases
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXIT: ${{ needs.evaluate.outputs.exit }}
+          PUBLISHED: ${{ needs.commit.outputs.published }}
+        run: |
+          pinned=$(node -p "require('./pin.json').channels[process.env.CHANNEL]?.ref ?? ''")
+          releases=0
+          node bin/t3blackout releases --channel "$CHANNEL" --out "$RUNNER_TEMP/newer.json" || releases=$?
+          node .github/scripts/security-issues.mjs held --channel "$CHANNEL" --exit "$EXIT" --published "$PUBLISHED" \
+            --pinned "$pinned" --newer "$RUNNER_TEMP/newer.json" --report "$RUNNER_TEMP/evaluation/report.md"
+          exit "$releases"

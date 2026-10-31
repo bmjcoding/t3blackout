@@ -1,0 +1,10 @@
+[Unit]
+Description=Scheduled T3 Blackout update
+
+[Timer]
+OnCalendar=__CALENDAR__
+# Run at the next boot/login if the machine was off at the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

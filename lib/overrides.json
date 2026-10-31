@@ -1,0 +1,172 @@
+{
+  "note": "Security overrides applied to every build (rule deps/security-overrides). Each replaces one exact vulnerable version with the lowest same-major version that fixes every advisory against it, chosen 2026-10-30 from OSV.dev and checked for publisher and provenance continuity (lib/fastlane.mjs). Changing this file needs a commit the repository owner signs. Remove an entry once upstream ships the fix.",
+  "overrides": [
+    {
+      "selector": "@modelcontextprotocol/sdk@1.29.0",
+      "version": "1.32.0",
+      "advisories": [
+        "GHSA-22jm-h49p-29qw",
+        "GHSA-46jr-4wx8-v453",
+        "GHSA-6qxp-vccf-f47h",
+        "GHSA-f897-62hf-6gxq",
+        "GHSA-6prh-2h8m-c8cw",
+        "GHSA-rvq5-wwqv-78pq"
+      ]
+    },
+    {
+      "selector": "body-parser@2.3.0",
+      "version": "2.4.0",
+      "advisories": [
+        "GHSA-27r3-jxmh-p828"
+      ]
+    },
+    {
+      "selector": "dompurify@3.4.16",
+      "version": "3.4.17",
+      "advisories": [
+        "GHSA-cg2g-xh64-v4q7",
+        "GHSA-mrv2-3pqr-j5jr",
+        "GHSA-c6gr-qvv4-5v3f"
+      ]
+    },
+    {
+      "selector": "fast-uri@3.1.8",
+      "version": "3.1.9",
+      "advisories": [
+        "GHSA-w74x-v6f9-j3xg",
+        "GHSA-wjr9-j795-jxcr",
+        "GHSA-333x-w4r6-6crp",
+        "GHSA-xhq7-xmqj-769h"
+      ]
+    },
+    {
+      "selector": "hono@4.13.7",
+      "version": "4.13.11",
+      "advisories": [
+        "GHSA-5r4p-p66f-jhc7"
+      ]
+    },
+    {
+      "selector": "ip-address@10.7.2",
+      "version": "10.7.4",
+      "advisories": [
+        "GHSA-rxp7-6hxx-x8q5"
+      ]
+    },
+    {
+      "selector": "path-to-regexp@6.1.0",
+      "version": "6.3.0",
+      "advisories": [
+        "GHSA-9wv6-86v2-598j"
+      ]
+    },
+    {
+      "selector": "proxy-addr@2.0.7",
+      "version": "2.0.8",
+      "advisories": [
+        "GHSA-jqcg-44mw-7w3h"
+      ]
+    },
+    {
+      "selector": "qs@6.16.0",
+      "version": "6.16.1",
+      "advisories": [
+        "GHSA-6pq8-jhm2-2vcw"
+      ]
+    },
+    {
+      "selector": "seroval@1.5.4",
+      "version": "1.6.11",
+      "advisories": [
+        "GHSA-p6vx-979v-rg4c",
+        "GHSA-7rv5-mrxv-xcr9",
+        "GHSA-97r2-qh9m-474h",
+        "GHSA-jp82-f5mq-hwhp",
+        "GHSA-wp97-x4hv-qvhp",
+        "GHSA-9wx9-5pv9-3349",
+        "GHSA-f86p-h4j2-7qgj"
+      ]
+    },
+    {
+      "selector": "sharp@0.35.4",
+      "version": "0.35.5",
+      "advisories": [
+        "GHSA-wq5f-xc86-pv6w"
+      ]
+    },
+    {
+      "selector": "shell-quote@1.10.0",
+      "version": "1.11.0",
+      "advisories": [
+        "GHSA-pqg4-j6r4-53mv"
+      ]
+    },
+    {
+      "selector": "smol-toml@1.8.0",
+      "version": "1.9.0",
+      "advisories": [
+        "GHSA-r4xh-jqrq-34v2"
+      ]
+    },
+    {
+      "selector": "stream-json@3.6.0",
+      "version": "3.7.0",
+      "advisories": [
+        "GHSA-jj87-hc4r-jwfw"
+      ]
+    },
+    {
+      "selector": "undici@6.29.0",
+      "version": "6.29.1",
+      "advisories": [
+        "GHSA-2m5v-pch6-74hx",
+        "GHSA-qrxm-fqhp-jwvm",
+        "GHSA-xjj6-f33q-929c",
+        "GHSA-4qv8-2p9j-2685",
+        "GHSA-9fm3-97px-rjf6"
+      ]
+    },
+    {
+      "selector": "undici@7.29.1",
+      "version": "7.30.1",
+      "advisories": [
+        "GHSA-2m5v-pch6-74hx",
+        "GHSA-4w7w-5xrc-9h26",
+        "GHSA-qrxm-fqhp-jwvm",
+        "GHSA-xjj6-f33q-929c",
+        "GHSA-4qv8-2p9j-2685",
+        "GHSA-55wc-3pg8-jfw6",
+        "GHSA-9fm3-97px-rjf6",
+        "GHSA-f72v-6w45-q472"
+      ]
+    },
+    {
+      "selector": "undici@8.11.2",
+      "version": "8.12.2",
+      "advisories": [
+        "GHSA-2m5v-pch6-74hx",
+        "GHSA-4w7w-5xrc-9h26",
+        "GHSA-qrxm-fqhp-jwvm",
+        "GHSA-xjj6-f33q-929c",
+        "GHSA-4qv8-2p9j-2685",
+        "GHSA-55wc-3pg8-jfw6",
+        "GHSA-9fm3-97px-rjf6",
+        "GHSA-f72v-6w45-q472"
+      ]
+    },
+    {
+      "selector": "zod@4.5.4",
+      "version": "4.6.6",
+      "advisories": [
+        "GHSA-mrhx-c7xc-m3w5"
+      ]
+    },
+    {
+      "selector": "zod@4.6.5",
+      "version": "4.6.6",
+      "advisories": [
+        "GHSA-mrhx-c7xc-m3w5"
+      ]
+    }
+  ]
+}

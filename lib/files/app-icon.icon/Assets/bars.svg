@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>T3 Blackout: redaction bars</title>
+  <rect fill="white" x="20.48" y="56.32" width="58.88" height="8.96" rx="1.92"/>
+  <rect fill="white" x="84.48" y="56.32" width="23.04" height="8.96" rx="1.92"/>
+  <rect fill="white" x="20.48" y="71.68" width="28.16" height="8.96" rx="1.92"/>
+  <rect fill="white" x="20.48" y="87.04" width="51.20" height="8.96" rx="1.92"/>
+  <rect fill="white" x="76.80" y="87.04" width="30.72" height="8.96" rx="1.92"/>
+  <rect fill="white" x="20.48" y="102.40" width="69.12" height="8.96" rx="1.92"/>
+</svg>

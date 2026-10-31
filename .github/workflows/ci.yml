@@ -1,0 +1,81 @@
+# Checks every push and pull request: the repo's tests, its shell scripts (the
+# SSH runner as the remote shell gets it included) and workflows, and that the
+# strip rules still apply to the pinned upstream commit. Building it happens in
+# build.yml when the rules or build code change, and hourly in evaluate.yml.
+# Read-only token, no secrets.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Repo tests
+        run: node --test test/*.test.mjs
+
+      # One script per syntax check (bash -n reads only its first file), with the
+      # shell its shebang names.
+      - name: Shell scripts
+        run: |
+          for script in install.sh scripts/*.sh; do
+            case "$(head -n 1 "$script")" in
+              *bash*) bash -n "$script" ;;
+              *) sh -n "$script" ;;
+            esac || { echo "syntax error in $script"; exit 1; }
+          done
+          shellcheck -S warning install.sh scripts/*.sh
+
+      # The injected runner is template-literal source; check what /bin/sh on the
+      # host runs. SC1090: it sources the account's server.env on purpose.
+      # SC3067: test -O is in both shells it meets (macOS bash as sh, dash).
+      - name: SSH runner (lib/files/ssh-runner-blackout.sh, rendered)
+        run: |
+          node .github/scripts/render-runner.mjs fragment lib/files/ssh-runner-blackout.sh "$RUNNER_TEMP/runner.sh"
+          sh -n "$RUNNER_TEMP/runner.sh"
+          bash --posix -n "$RUNNER_TEMP/runner.sh"
+          shellcheck -s sh -S warning -e SC1090,SC3067 "$RUNNER_TEMP/runner.sh"
+
+      - name: Workflows (actionlint 1.7.12, checksum pinned)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint"
+
+      - name: Every action is pinned to a full commit SHA
+        run: node .github/scripts/check-action-pins.mjs
+
+      - name: pin.json and lib/overrides.json are valid, and every pinned tag names its commit upstream
+        run: |
+          node -e 'import("./lib/pin.mjs").then((m) => m.readPin()).then((p) => console.log(JSON.stringify(p.channels)))'
+          node -e 'import("./lib/overrides.mjs").then((m) => console.log(m.readOverrides().length, "security overrides"))'
+          node bin/t3blackout pin-check
+
+      # The pinned commit itself, not its tag (a tag can move; the step above
+      # catches that).
+      - name: Strip rules apply to the pinned commit
+        run: |
+          sha=$(node -p "require('./pin.json').channels.nightly.sha")
+          node bin/t3blackout check --ref "$sha"

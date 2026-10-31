@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "packages": {
+    "node-datachannel@0.32.3": {
+      "why": "WebRTC bindings in expo-device-hub's closure. Its install script (prebuild-install, else an unfrozen source build) is off; these are the prebuilds it would download, from the package's GitHub release v0.32.3, each archive's SHA-256 checked against GitHub's published digest. Only the listed file is taken from each archive.",
+      "assets": [
+        {
+          "platform": "darwin",
+          "arch": "arm64",
+          "url": "https://github.com/murat-dogan/node-datachannel/releases/download/v0.32.3/node-datachannel-v0.32.3-napi-v8-darwin-arm64.tar.gz",
+          "sha256": "69fbffdacb9abda2a76809693443328b6aad71af25947e0733913340365f4da8",
+          "files": {
+            "build/Release/node_datachannel.node": "1d4f814bede82a5412b19e8973e44eb484d504acc52f17796e90add75dc9ac80"
+          }
+        },
+        {
+          "platform": "linux",
+          "arch": "x64",
+          "url": "https://github.com/murat-dogan/node-datachannel/releases/download/v0.32.3/node-datachannel-v0.32.3-napi-v8-linux-x64.tar.gz",
+          "sha256": "4092afc9cd594a3326eb1bd823da452b227b742ea8222689b2cea6f7344cf67a",
+          "files": {
+            "build/Release/node_datachannel.node": "1da298b65c65c2d47109708af662ee2a3b92cf1f34881da6455619e14729e7b4"
+          }
+        }
+      ]
+    }
+  }
+}

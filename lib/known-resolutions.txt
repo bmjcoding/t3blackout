@@ -1,0 +1,6 @@
+# Lockfile packages allowed to come from somewhere other than the npm registry
+# (a tarball URL), one per line: "<pnpm-lock.yaml package key> <integrity>".
+# Everything else must be an exact registry version (lib/gates.mjs
+# resolutionKind), so upstream can't swap a dependency's source unnoticed.
+# Listing one is vouching for those exact bytes; changing this file needs a
+# commit the repository owner signs.

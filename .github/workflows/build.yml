@@ -1,0 +1,125 @@
+# Builds the pinned releases with this commit's rules, injected files, overrides
+# and build code whenever those or pin.json change: typecheck, package,
+# forbidden-endpoint scan and offline smoke test (bin/t3blackout check --build),
+# then the tests in test/stripped/ inside the stripped checkout and a syntax check
+# of the SSH runner as upstream's tunnel.ts renders it. Each pinned channel the
+# change affects is built (.github/scripts/build-channels.mjs): a pin-only commit
+# builds the channels it moved. The hourly evaluator builds only when upstream
+# has a newer release, so without this a rule or pin change that no longer
+# compiles would pass CI, and every machine would find out on its next update
+# (each Mac builds and checks a pin itself before installing it, so it holds the
+# update there; this says so first). Advisory, like every CI result.
+# Runs upstream code: read-only token, no secrets.
+
+name: Build the pinned release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bin/**"
+      - "lib/**"
+      - "pin.json"
+      - "test/stripped/**"
+      - ".github/workflows/build.yml"
+      - ".github/scripts/build-channels.mjs"
+      - ".github/scripts/is-main.mjs"
+      - ".github/scripts/render-runner.mjs"
+      - ".github/scripts/stripped-tests.mjs"
+  pull_request:
+    paths:
+      - "bin/**"
+      - "lib/**"
+      - "pin.json"
+      - "test/stripped/**"
+      - ".github/workflows/build.yml"
+      - ".github/scripts/build-channels.mjs"
+      - ".github/scripts/is-main.mjs"
+      - ".github/scripts/render-runner.mjs"
+      - ".github/scripts/stripped-tests.mjs"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  channels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      list: ${{ steps.pick.outputs.list }}
+    steps:
+      # Full history: the change is measured against its base commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Pinned channels this change affects
+        id: pick
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          list=$(node .github/scripts/build-channels.mjs "$BASE")
+          echo "building: $list"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: channels
+    if: needs.channels.outputs.list != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ fromJSON(needs.channels.outputs.list) }}
+    env:
+      CHANNEL: ${{ matrix.channel }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Upstream's packageManager field picks the pnpm version.
+      - run: corepack enable
+
+      # Upstream's Linux packager checks for these first (scripts/
+      # build-desktop-artifact.ts LINUX_DESKTOP_BUILD_PREREQUISITES); the runner
+      # image has Rust, a C toolchain and pkg-config but not these two.
+      - name: Linux packaging prerequisites
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends libsecret-1-dev imagemagick
+
+      # The pinned commit itself, not its tag (a tag can move).
+      - name: Build the pinned release
+        run: |
+          sha=$(node -p "require('./pin.json').channels[process.env.CHANNEL].sha")
+          node bin/t3blackout check --ref "$sha" --build
+
+      # The *.browser.test.tsx ones run in upstream's Playwright project (headless
+      # Chromium, the version upstream's lockfile pins).
+      - name: Chromium for the browser tests
+        working-directory: build/work/apps/web
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Tests in the stripped checkout (test/stripped)
+        run: node .github/scripts/stripped-tests.mjs build/work
+
+      - name: The SSH runner as tunnel.ts renders it
+        run: |
+          node .github/scripts/render-runner.mjs tunnel build/work/packages/ssh/src/tunnel.ts "$RUNNER_TEMP/runner.sh"
+          sh -n "$RUNNER_TEMP/runner.sh"
